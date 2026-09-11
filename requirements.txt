@@ -1,0 +1,4 @@
+fastapi
+uvicorn
+pandas
+playwright==1.47.0
