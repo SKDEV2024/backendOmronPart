@@ -26,7 +26,7 @@ app.add_middleware(
 
 SEARCH_BASE_URL = "https://industrial.omron.eu/en/services-support/support/product-lifecycle-management"
 LOGIN_URL = "https://industrial.omron.eu/en/login"
-USER_DATA_DIR = "./omron_browser_profile"  # โฟลเดอร์เก็บสถานะการล็อกอิน
+USER_DATA_DIR = "./omron_browser_profile"
 MIN_DELAY_SEC = 1.0
 
 
@@ -54,7 +54,7 @@ async def dismiss_cookie_banner(page):
 
 @app.get("/", response_class=HTMLResponse)
 async def serve_ui():
-    return """
+    return r"""
     <!DOCTYPE html>
     <html lang="th">
     <head>
@@ -102,7 +102,11 @@ async def serve_ui():
     <script>
         async function triggerManualLogin() {
             alert("ระบบกำลังเปิดเบราว์เซอร์ขึ้นมา...\nกรุณาล็อกอินเข้าสู่ระบบ Omron ให้เรียบร้อย แล้วปิดหน้าต่างเบราว์เซอร์นั้นเพื่อบันทึกสถานะครับ");
-            await fetch('/login-manual', { method: 'POST' });
+            try {
+                await fetch('/login-manual', { method: 'POST' });
+            } catch (e) {
+                console.error(e);
+            }
         }
 
         async function processSearch() {
@@ -114,7 +118,7 @@ async def serve_ui():
             const errorBox = document.getElementById('errorBox');
             const successBox = document.getElementById('successBox');
 
-            const partsCount = text.split('\\n').map(l => l.trim()).filter(l => l.length > 0).length;
+            const partsCount = text.split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 0).length;
 
             btn.disabled = true;
             errorBox.style.display = 'none';
@@ -146,7 +150,7 @@ async def serve_ui():
                     let detail = `เกิดข้อผิดพลาด (HTTP ${response.status})`;
                     try {
                         const errJson = await response.json();
-                        if (errJson && errJson.detail) detail += `\\n${errJson.detail}`;
+                        if (errJson && errJson.detail) detail += '\n' + errJson.detail;
                     } catch (_) {}
                     showError(detail);
                 }
@@ -172,17 +176,15 @@ async def serve_ui():
 
 @app.post("/login-manual")
 async def login_manual():
-    """เปิดเบราว์เซอร์แบบให้ผู้ใช้กด Login ด้วยตัวเองเพื่อบันทึก Session"""
     async with async_playwright() as p:
         context = await p.chromium.launch_persistent_context(
             user_data_dir=USER_DATA_DIR,
-            headless=False,  # เปิดจอให้เห็นชัดเจน
+            headless=False,
             args=["--disable-blink-features=AutomationControlled"]
         )
         page = context.pages[0] if context.pages else await context.new_page()
         await page.goto(LOGIN_URL)
         
-        # รอจนกว่าผู้ใช้จะปิดหน้าต่างเบราว์เซอร์ไปเอง
         try:
             while len(context.pages) > 0:
                 await asyncio.sleep(1)
@@ -203,10 +205,9 @@ async def process_search_endpoint(part_numbers: str = Form(...)):
     logger.info(f"เริ่มการค้นหาพาร์ทจำนวน {len(parts_list)} รายการด้วยเซสชันที่บันทึกไว้")
 
     async with async_playwright() as p:
-        # ใช้ Persistent Context เพื่อโหลดสถานะ Login เดิมมาใช้ต่อทันที
         context = await p.chromium.launch_persistent_context(
             user_data_dir=USER_DATA_DIR,
-            headless=True,  # รันแบบเบื้องหลังอัตโนมัติ
+            headless=True,
             args=["--disable-blink-features=AutomationControlled"]
         )
 
