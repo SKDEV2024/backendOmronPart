@@ -18,8 +18,8 @@ app = FastAPI(title="Omron Part Lifecycle Exporter")
 SEARCH_BASE_URL = "https://industrial.omron.eu/en/services-support/support/product-lifecycle-management"
 STATE_FILE = "omron_auth_state.json"
 
-MIN_DELAY_SEC = 2.0
-MAX_DELAY_SEC = 4.0
+MIN_DELAY_SEC = 1.0
+MAX_DELAY_SEC = 2.0
 
 
 def _empty_result(part: str, target_url: str, status_label: str) -> list[dict]:
@@ -34,8 +34,8 @@ def _empty_result(part: str, target_url: str, status_label: str) -> list[dict]:
 
 
 async def get_authenticated_context(browser, username: str = "", password: str = ""):
-    """จัดการ Session ของ Playwright: ใช้ Session เดิม หรือทำ Auto-Login ผ่าน Popup"""
-    # 1. โหลด Session เดิมหากมีบันทึกไว้แล้ว
+    """จัดการ Session ของ Playwright: ใช้ Session เดิม หรือทำ Login ผ่าน Popup Dropdown"""
+    # 1. โหลด Session เดิมหากมีบันทึกไว้
     if os.path.exists(STATE_FILE):
         try:
             context = await browser.new_context(
@@ -48,11 +48,11 @@ async def get_authenticated_context(browser, username: str = "", password: str =
         except Exception as e:
             logger.warning(f"Session เดิมใช้ไม่ได้: {e}")
 
-    # 2. กรณีไม่มี Session ต้องระบุ Username / Password เพื่อล็อกอินผ่าน Popup
+    # 2. กรณีไม่มี Session ต้องระบุ Username / Password
     if not username or not password:
         raise HTTPException(
             status_code=400,
-            detail="ยังไม่มี Session หรือหมดอายุ กรุณากรอก Email และ Password เพื่อล็อกอิน"
+            detail="ยังไม่มี Session กรุณากรอก Email และ Password เพื่อเข้าสู่ระบบ"
         )
 
     context = await browser.new_context(
@@ -61,119 +61,125 @@ async def get_authenticated_context(browser, username: str = "", password: str =
     )
     page = await context.new_page()
 
-    logger.info("กำลังเปิดหน้าหลักเพื่อทำการ Login ผ่าน Popup...")
+    logger.info("กำลังเปิดหน้าเว็บเพื่อทำการ Login ผ่าน Popup Dropdown...")
     try:
         await page.goto(SEARCH_BASE_URL, wait_until="domcontentloaded", timeout=30000)
 
-        # กดปุ่มยอมรับ Cookie/Privacy Notice หากมีขึ้นมาบังหน้าจอ
+        # เคลียร์ Banner Cookie (ถ้ามี)
         try:
-            accept_cookie_btn = page.locator("#onetrust-accept-btn-handler, button:has-text('Accept'), button:has-text('Allow')")
-            if await accept_cookie_btn.is_visible(timeout=3000):
-                await accept_cookie_btn.click()
+            accept_btn = page.locator("#onetrust-accept-btn-handler, button:has-text('Accept All Cookies'), .onetrust-close-btn-handler")
+            await accept_btn.first.click(timeout=4000)
+            await page.wait_for_timeout(1000)
         except Exception:
             pass
 
-        # คลิกปุ่ม/ลิงก์ Login เพื่อเปิด Popup
-        login_trigger = page.locator("a:has-text('Log in'), button:has-text('Log in'), .user-login-link, a[href*='login']")
-        await login_trigger.first.click()
+        # กดปุ่ม 'Login or register' เมนูด้านบนเพื่อเปิด Modal/Popup Form
+        trigger_btn = page.locator("*:has-text('Login or register')").last
+        await trigger_btn.click(timeout=10000)
 
-        # รอให้ Popup ล็อกอินแสดงผล
-        email_selector = "input[type='email'], input[name='email'], input[name='username'], input[id*='email' i]"
-        pass_selector = "input[type='password'], input[name='password'], input[id*='password' i]"
+        # รอ Form ล็อกอินใน Popup ปรากฏ
+        email_input = page.locator("input[type='email'], input[name='email'], input[name='username']")
+        pass_input = page.locator("input[type='password'], input[name='password']")
 
-        await page.wait_for_selector(email_selector, timeout=15000)
-        await page.fill(email_selector, username)
-        await page.fill(pass_selector, password)
+        await email_input.first.wait_for(state="visible", timeout=10000)
+        await email_input.first.fill(username)
+        await pass_input.first.fill(password)
 
-        # กดปุ่ม Submit ภายใน Popup
-        submit_btn = page.locator("form button[type='submit'], form input[type='submit'], .modal-body button[type='submit']")
+        # กดปุ่ม 'Log in' สีน้ำเงินภายใน Popup Form
+        submit_btn = page.locator("button:has-text('Log in'), input[type='submit']")
         await submit_btn.first.click()
 
-        # รอให้กระบวนการ Login ใน Popup เสร็จสิ้น
+        # รอประมวลผล Login
         await page.wait_for_timeout(4000)
 
-        # บันทึก Session เก็บไว้ใช้ครั้งถัดไป
+        # บันทึก Session เก็บไว้ใช้ครั้งต่อไป
         await context.storage_state(path=STATE_FILE)
-        logger.info("ล็อกอินผ่าน Popup สำเร็จ และบันทึก Session เรียบร้อย")
+        logger.info("ล็อกอินผ่าน Popup สำเร็จ และบันทึก Session เรียบร้อยแล้ว")
         return context
 
     except Exception as e:
         logger.error(f"การล็อกอินผ่าน Popup ล้มเหลว: {e}")
         raise HTTPException(
             status_code=400,
-            detail=f"ล็อกอินไม่สำเร็จ ตรวจสอบ Email/Password หรือลองอีกครั้ง: {str(e)[:100]}"
+            detail=f"ล็อกอินไม่สำเร็จ ตรวจสอบ Email/Password หรือลองใหม่อีกครั้ง: {str(e)[:150]}"
         )
 
 
-async def search_single_part(page, part: str) -> list[dict]:
+async def search_omron_parts_fast(page, parts_list: list[str]) -> list[dict]:
+    """ค้นหาข้อมูล Part Number แบบรวดเร็วในหน้าเดียว ไม่ reload หน้าใหม่ทุกครั้ง"""
+    all_results = []
     target_url = SEARCH_BASE_URL
 
-    try:
-        await page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
+    await page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
+    search_input_selector = "input[type='search'], input[placeholder*='search' i], input.form-control"
+    await page.wait_for_selector(search_input_selector, timeout=15000)
 
-        search_input_selector = "input[type='search'], input[placeholder*='search' i], input.form-control"
-        await page.wait_for_selector(search_input_selector, timeout=15000)
-        
-        search_box = page.locator(search_input_selector).first
-        await search_box.fill("")
-        await search_box.fill(part)
-        await search_box.press("Enter")
+    for idx, part in enumerate(parts_list):
+        try:
+            logger.info(f"[{part}] กำลังค้นหา... ({idx+1}/{len(parts_list)})")
+            
+            search_box = page.locator(search_input_selector).first
+            await search_box.fill("")
+            await search_box.fill(part)
+            await search_box.press("Enter")
 
-        await page.wait_for_timeout(3000)
-        
-        part_results = []
-        page_num = 1
+            await page.wait_for_timeout(2000)
 
-        while True:
-            rows = await page.query_selector_all("table tbody tr")
+            page_num = 1
+            part_found = False
 
-            if not rows and page_num == 1:
-                logger.info(f"[{part}] ไม่พบผลลัพธ์ในตาราง")
-                return _empty_result(part, target_url, "Not Found")
+            while True:
+                rows = await page.query_selector_all("table tbody tr")
+                
+                if not rows and page_num == 1:
+                    break
 
-            for row in rows:
-                cols = await row.query_selector_all("td")
-                if len(cols) >= 4:
-                    p_num = (await cols[0].text_content() or "").strip()
-                    status = (await cols[1].text_content() or "").strip()
-                    replacement = (await cols[2].text_content() or "").strip()
-                    disco_date = (await cols[3].text_content() or "").strip()
+                for row in rows:
+                    cols = await row.query_selector_all("td")
+                    if len(cols) >= 4:
+                        p_num = (await cols[0].text_content() or "").strip()
+                        status = (await cols[1].text_content() or "").strip()
+                        replacement = (await cols[2].text_content() or "").strip()
+                        disco_date = (await cols[3].text_content() or "").strip()
 
-                    if "no result" in p_num.lower() or "not found" in p_num.lower():
-                        continue
+                        if "no result" in p_num.lower() or "not found" in p_num.lower():
+                            continue
 
-                    part_results.append({
-                        "Search Input": part,
-                        "Part Number": p_num,
-                        "Status": status,
-                        "Possible Replacement": replacement,
-                        "Discontinuation Date": disco_date,
-                        "Source URL": target_url,
-                    })
+                        all_results.append({
+                            "Search Input": part,
+                            "Part Number": p_num,
+                            "Status": status,
+                            "Possible Replacement": replacement,
+                            "Discontinuation Date": disco_date,
+                            "Source URL": target_url,
+                        })
+                        part_found = True
 
-            next_button = await page.query_selector("ul.pagination li.next:not(.disabled) a, a.next-page, button.btn-next")
+                # ตรวจสอบการเปลี่ยนหน้า (Pagination)
+                next_button = await page.query_selector("ul.pagination li.next:not(.disabled) a, a.next-page, button.btn-next")
+                if next_button and await next_button.is_visible():
+                    page_num += 1
+                    logger.info(f"[{part}] กำลังดึงข้อมูลหน้า {page_num}...")
+                    await next_button.click()
+                    await page.wait_for_timeout(2000)
+                else:
+                    break
 
-            if next_button and await next_button.is_visible():
-                logger.info(f"[{part}] กำลังดึงข้อมูลหน้า {page_num + 1}...")
-                await next_button.click()
-                await page.wait_for_timeout(2500)
-                page_num += 1
-            else:
-                break
+            if not part_found:
+                all_results.extend(_empty_result(part, target_url, "Not Found"))
 
-        if not part_results:
-            return _empty_result(part, target_url, "Not Found")
+        except Exception as e:
+            logger.error(f"[{part}] เกิดข้อผิดพลาด: {e}")
+            all_results.extend(_empty_result(part, target_url, f"Error: {str(e)[:30]}"))
 
-        logger.info(f"[{part}] ดึงข้อมูลสำเร็จ รวม {len(part_results)} รายการ")
-        return part_results
+        if idx < len(parts_list) - 1:
+            await asyncio.sleep(MIN_DELAY_SEC)
 
-    except Exception as e:
-        logger.error(f"[{part}] เกิดข้อผิดพลาด: {e}")
-        return _empty_result(part, target_url, f"Error: {str(e)[:50]}")
+    return all_results
 
 
 # ---------------------------------------------------------
-# Front-end UI (เสิร์ฟผ่านหน้าแรก /)
+# Front-end UI (เสิร์ฟผ่าน /)
 # ---------------------------------------------------------
 @app.get("/", response_class=HTMLResponse)
 async def serve_ui():
@@ -202,7 +208,7 @@ async def serve_ui():
     <body>
 
     <div class="card">
-        <h3>🔑 ล็อกอิน Omron Account</h3>
+        <h3>🔑 เข้าสู่ระบบ Omron Account</h3>
         <label>Email / Username:</label>
         <input type="email" id="userInput" placeholder="อีเมลบัญชี Omron ของคุณ">
         <label>Password:</label>
@@ -213,7 +219,7 @@ async def serve_ui():
     <div class="card">
         <h2>🔎 ค้นหา Part Number</h2>
         <p>ใส่ Part Number ที่ต้องการเช็ค (บรรทัดละ 1 รายการ):</p>
-        <textarea id="partsInput" placeholder="CP1E&#10;E2E-X3D1-M1G&#10;MY4N DC24"></textarea>
+        <textarea id="partsInput" placeholder="CP1E-E10DR-A&#10;CP1E-E10DR-D&#10;CP1E-E10DT-D"></textarea>
         <button id="submitBtn" onclick="processSearch()">เริ่มค้นหา & โหลด CSV</button>
 
         <div id="loadingBox" class="loading"></div>
@@ -238,7 +244,7 @@ async def serve_ui():
             errorBox.style.display = 'none';
             successBox.style.display = 'none';
             loading.style.display = 'block';
-            loading.textContent = '⏳ กำลังเปิดระบบ ค้นหา และดึงข้อมูล... กรุณารอสักครู่';
+            loading.textContent = '⏳ กำลังประมวลผลค้นหาและสร้างไฟล์ CSV... กรุณารอสักครู่';
 
             try {
                 const response = await fetch('/search', {
@@ -307,8 +313,7 @@ async def search_omron_parts(
     if not parts_list:
         raise HTTPException(status_code=400, detail="No part numbers provided")
 
-    logger.info(f"เริ่มค้นหา {len(parts_list)} รายการ")
-    all_results = []
+    logger.info(f"เริ่มค้นหาจำนวน {len(parts_list)} รายการ")
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -320,14 +325,7 @@ async def search_omron_parts(
         page = await context.new_page()
 
         try:
-            for idx, part in enumerate(parts_list):
-                part_results = await search_single_part(page, part)
-                all_results.extend(part_results)
-
-                if idx < len(parts_list) - 1:
-                    delay = MIN_DELAY_SEC + (MAX_DELAY_SEC - MIN_DELAY_SEC) * os.urandom(1)[0] / 255
-                    await asyncio.sleep(delay)
-
+            all_results = await search_omron_parts_fast(page, parts_list)
         finally:
             await browser.close()
 
