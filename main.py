@@ -33,7 +33,7 @@ def _empty_result(part: str, target_url: str, status_label: str) -> list[dict]:
 
 
 async def get_authenticated_context(browser, username: str = "", password: str = ""):
-    """จัดการ Session ของ Playwright: ใช้ JavaScript Direct Injection ข้ามปัญหา Selector Timeout"""
+    """จัดการ Session ของ Playwright: เติมข้อมูลและ Submit Form ผ่าน JS Direct Event"""
     
     # 1. เช็ค Session เดิมจากไฟล์ storage_state
     if os.path.exists(STATE_FILE):
@@ -80,9 +80,9 @@ async def get_authenticated_context(browser, username: str = "", password: str =
     logger.info("กำลังเปิดหน้า Login ของ Omron...")
     try:
         await page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=25000)
-        await page.wait_for_timeout(3000) # รอหน้าจอ Render Form
+        await page.wait_for_timeout(3000)
 
-        # ลบ Cookie SDK ทิ้งด้วย JavaScript เพื่อเปิดทาง
+        # เคลียร์ Cookie Banner
         await page.evaluate("""
             () => {
                 const elements = document.querySelectorAll('#onetrust-consent-sdk, #onetrust-banner-sdk, .cookie-banner');
@@ -90,9 +90,9 @@ async def get_authenticated_context(browser, username: str = "", password: str =
             }
         """)
 
-        logger.info("กำลังกรอก Email และ Password ผ่าน JS Dynamic Selector...")
+        logger.info("กำลังกรอก Email และ Password...")
         
-        # กรอก Email และ Password ผ่าน JS เพื่อป้องกันปัญหา Timeout บน Shadow DOM / Dynamic Inputs
+        # ใส่ข้อมูล Username/Password และ Dispatch Event ให้ Form รับรู้
         login_success = await page.evaluate(f"""
             ([user, pwd]) => {{
                 const emailInput = document.querySelector('input[type="email"], input[name*="user"], input[name*="email"], input[placeholder*="Email"]');
@@ -113,23 +113,34 @@ async def get_authenticated_context(browser, username: str = "", password: str =
         """, [username, password])
 
         if not login_success:
-            # Fallback หากใช้ JS หาไม่เจอ
-            email_field = page.locator("input").filter(has_text="").first
-            await email_field.fill(username)
-            pass_field = page.locator("input[type='password']").first
-            await pass_field.fill(password)
+            raise Exception("ไม่พบช่องกรอก Email หรือ Password บนหน้า Login")
 
         await page.wait_for_timeout(1000)
 
-        # กดปุ่ม Log in
-        login_btn = page.locator("button[type='submit'], input[type='submit'], button:has-text('Log in'), button:has-text('Login')").first
-        
-        async with page.expect_navigation(wait_until="domcontentloaded", timeout=20000):
-            await login_btn.click(force=True)
+        # สั่ง Submit ผ่าน JS Direct Trigger เพื่อข้ามข้อจำกัด Element is not visible
+        logger.info("กำลังกดปุ่ม Login (JS Force Click)...")
+        await page.evaluate("""
+            () => {
+                const btn = document.querySelector('button[name="submit_button"], button.blue, button[type="submit"], input[type="submit"]');
+                if (btn) {
+                    btn.scrollIntoView();
+                    btn.click();
+                } else {
+                    const form = document.querySelector('form');
+                    if (form) form.submit();
+                }
+            }
+        """)
 
-        await page.wait_for_timeout(2000)
+        # รอ Navigation โหลดหน้าถัดไป
+        try:
+            await page.wait_for_load_state("domcontentloaded", timeout=15000)
+        except Exception:
+            pass
 
-        # ตรวจสอบ Error Message
+        await page.wait_for_timeout(3000)
+
+        # ตรวจสอบว่ามี Error แจ้งเตือนขึ้นที่หน้าเว็บหรือไม่
         error_msg = page.locator(".error-message, .alert-danger, .form-error, .invalid-feedback").first
         if await error_msg.is_visible(timeout=2000):
             err_text = await error_msg.text_content()
