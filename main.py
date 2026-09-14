@@ -32,10 +32,10 @@ def _empty_result(part: str, target_url: str, status_label: str) -> list[dict]:
     }]
 
 
-async def get_authenticated_context_and_page(browser, username: str = "", password: str = ""):
-    """จัดการ Session และคืนค่าทั้ง Context และ Page ที่ล็อกอินพร้อมใช้งาน"""
+async def get_authenticated_context(browser, username: str = "", password: str = ""):
+    """จัดการ Session ของ Playwright: ตรวจสอบ Session เดิม หรือ Login ใหม่ตาม UI จริง"""
     
-    # 1. ตรวจสอบ Session เดิมจาก storage_state
+    # 1. เช็ค Session เดิมจากไฟล์ storage_state
     if os.path.exists(STATE_FILE):
         try:
             context = await browser.new_context(
@@ -43,17 +43,16 @@ async def get_authenticated_context_and_page(browser, username: str = "", passwo
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                 viewport={"width": 1280, "height": 800}
             )
-            page = await context.new_page()
             
-            # เปิดหน้าค้นหาทันทีด้วย wait_until="commit" เพื่อความเร็วและลดโอกาส Timeout
-            await page.goto(SEARCH_BASE_URL, wait_until="commit", timeout=30000)
-            await page.wait_for_load_state("domcontentloaded", timeout=15000)
+            check_page = await context.new_page()
+            await check_page.goto(SEARCH_BASE_URL, wait_until="domcontentloaded", timeout=15000)
             
-            is_logged_in = await page.locator("a:has-text('Logout'), a:has-text('Sign out'), .my-account, button:has-text('Account')").first.is_visible(timeout=3000)
+            is_logged_in = await check_page.locator("a:has-text('Logout'), a:has-text('Sign out'), .my-account, button:has-text('Account')").first.is_visible(timeout=3000)
+            await check_page.close()
             
             if is_logged_in:
                 logger.info("ใช้งาน Session เดิมจาก storage_state สำเร็จ")
-                return context, page
+                return context
             else:
                 logger.warning("Session เดิมหมดอายุ กำลังเข้าสู่ระบบใหม่...")
                 await context.close()
@@ -64,7 +63,7 @@ async def get_authenticated_context_and_page(browser, username: str = "", passwo
             if os.path.exists(STATE_FILE):
                 os.remove(STATE_FILE)
 
-    # 2. เช็ค Credentials
+    # 2. ตรวจสอบ Credentials
     if not username or not password:
         raise HTTPException(
             status_code=400,
@@ -80,16 +79,10 @@ async def get_authenticated_context_and_page(browser, username: str = "", passwo
 
     logger.info("กำลังเปิดหน้า Login ของ Omron...")
     try:
-        # ปรับใช้ wait_until="commit" และขยาย Timeout เป็น 40000ms
-        await page.goto(LOGIN_URL, wait_until="commit", timeout=40000)
-        try:
-            await page.wait_for_load_state("domcontentloaded", timeout=15000)
-        except Exception:
-            pass
+        # เปิดหน้า Login และรอจนกว่า Network จะนิ่งเพื่อให้ Form โหลดครบ
+        await page.goto(LOGIN_URL, wait_until="networkidle", timeout=25000)
 
-        await page.wait_for_timeout(2000)
-
-        # เคลียร์ Cookie Banner
+        # ลบ Cookie Banner
         await page.evaluate("""
             () => {
                 const elements = document.querySelectorAll('#onetrust-consent-sdk, #onetrust-banner-sdk, .cookie-banner');
@@ -97,55 +90,32 @@ async def get_authenticated_context_and_page(browser, username: str = "", passwo
             }
         """)
 
-        logger.info("กำลังกรอก Email และ Password...")
+        # ค้นหาช่อง Email address ตาม placeholder ใน UI จริง
+        email_field = page.get_by_placeholder("Email address").or_(
+            page.locator("input[type='email']")
+        ).first
         
-        login_success = await page.evaluate(f"""
-            ([user, pwd]) => {{
-                const emailInput = document.querySelector('input[type="email"], input[name*="user"], input[name*="email"], input[placeholder*="Email"]');
-                const passInput = document.querySelector('input[type="password"], input[name*="pass"]');
-                
-                if (emailInput && passInput) {{
-                    emailInput.value = user;
-                    emailInput.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                    emailInput.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                    
-                    passInput.value = pwd;
-                    passInput.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                    passInput.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                    return true;
-                }}
-                return false;
-            }}
-        """, [username, password])
+        await email_field.wait_for(state="attached", timeout=15000)
 
-        if not login_success:
-            raise Exception("ไม่พบช่องกรอก Email หรือ Password บนหน้า Login")
+        logger.info("กำลังกรอก Email และ Password...")
+        await email_field.fill(username)
+        
+        pass_field = page.get_by_placeholder("Password").or_(
+            page.locator("input[type='password']")
+        ).first
+        await pass_field.fill(password)
 
-        await page.wait_for_timeout(1000)
+        # ปุ่ม Log in สีฟ้าตาม UI จริง
+        login_submit_btn = page.get_by_role("button", name="Log in").or_(
+            page.locator("button:has-text('Log in')")
+        ).first
 
-        # กดปุ่ม Login
-        logger.info("กำลังกดปุ่ม Login (JS Direct Trigger)...")
-        await page.evaluate("""
-            () => {
-                const btn = document.querySelector('button[name="submit_button"], button.blue, button[type="submit"], input[type="submit"]');
-                if (btn) {
-                    btn.scrollIntoView();
-                    btn.click();
-                } else {
-                    const form = document.querySelector('form');
-                    if (form) form.submit();
-                }
-            }
-        """)
+        async with page.expect_navigation(wait_until="domcontentloaded", timeout=20000):
+            await login_submit_btn.click(force=True)
 
-        try:
-            await page.wait_for_load_state("commit", timeout=20000)
-        except Exception:
-            pass
+        await page.wait_for_timeout(2000)
 
-        await page.wait_for_timeout(3000)
-
-        # ตรวจสอบ Error Response
+        # ตรวจสอบ Error Message
         error_msg = page.locator(".error-message, .alert-danger, .form-error, .invalid-feedback").first
         if await error_msg.is_visible(timeout=2000):
             err_text = await error_msg.text_content()
@@ -153,7 +123,7 @@ async def get_authenticated_context_and_page(browser, username: str = "", passwo
 
         await context.storage_state(path=STATE_FILE)
         logger.info("เข้าสู่ระบบสำเร็จและบันทึก Session เรียบร้อยแล้ว")
-        return context, page
+        return context
 
     except Exception as e:
         logger.error(f"การเข้าสู่ระบบล้มเหลว: {e}")
@@ -165,20 +135,13 @@ async def get_authenticated_context_and_page(browser, username: str = "", passwo
 
 
 async def search_omron_parts_fast(page, parts_list: list[str]) -> list[dict]:
-    """ค้นหาข้อมูล Part Number บนหน้าเว็บและดึงตารางผลลัพธ์"""
+    """ค้นหาข้อมูล Part Number และดึงตารางผลลัพธ์"""
     all_results = []
     target_url = SEARCH_BASE_URL
 
-    # เปิดหน้า Search หากยังไม่ได้อยู่ที่หน้า Search
-    if SEARCH_BASE_URL not in page.url:
-        logger.info("กำลังนำทางไปยังหน้า Search...")
-        try:
-            await page.goto(target_url, wait_until="commit", timeout=40000)
-            await page.wait_for_load_state("domcontentloaded", timeout=15000)
-        except Exception as err:
-            logger.warning(f"การโหลดหน้า Search ใช้เวลานานเกินกำหนด แต่จะพยายามค้นหาต่อ: {err}")
-
-    # เคลียร์ Banner
+    await page.goto(target_url, wait_until="domcontentloaded", timeout=20000)
+    
+    # ลบ Cookie Banner หน้าค้นหา
     await page.evaluate("""
         () => {
             const elements = document.querySelectorAll('#onetrust-consent-sdk, #onetrust-banner-sdk, .cookie-banner');
@@ -186,15 +149,11 @@ async def search_omron_parts_fast(page, parts_list: list[str]) -> list[dict]:
         }
     """)
 
-    search_input = page.locator("input[type='search'], input[name='query'], input[placeholder*='Search']").first
-    
-    try:
-        await search_input.wait_for(state="attached", timeout=15000)
-    except Exception:
-        logger.error("ไม่พบช่องค้นหาบนหน้าเว็บ")
-        for part in parts_list:
-            all_results.extend(_empty_result(part, target_url, "Search Box Not Found"))
-        return all_results
+    search_input = page.get_by_placeholder("Search by part number, short item code or EAN code").or_(
+        page.locator("input[type='search'], input[name='query'], input.form-control")
+    ).first
+
+    await search_input.wait_for(state="visible", timeout=10000)
 
     for idx, part in enumerate(parts_list):
         try:
@@ -204,7 +163,7 @@ async def search_omron_parts_fast(page, parts_list: list[str]) -> list[dict]:
             await search_input.fill(part)
             await search_input.press("Enter")
 
-            await page.wait_for_timeout(2000)
+            await page.wait_for_timeout(1500)
 
             page_num = 1
             part_found = False
@@ -395,14 +354,11 @@ async def search_omron_parts(
             args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
         )
 
+        context = await get_authenticated_context(browser, username, password)
+        page = await context.new_page()
+
         try:
-            context, page = await get_authenticated_context_and_page(browser, username, password)
             all_results = await search_omron_parts_fast(page, parts_list)
-        except HTTPException as http_ex:
-            raise http_ex
-        except Exception as e:
-            logger.error(f"Search Process Exception: {e}")
-            raise HTTPException(status_code=500, detail=f"เกิดข้อผิดพลาดในการประมวลผล: {str(e)[:150]}")
         finally:
             await browser.close()
 
