@@ -24,7 +24,6 @@ app.add_middleware(
 )
 
 SEARCH_BASE_URL = "https://industrial.omron.eu/en/services-support/support/product-lifecycle-management"
-LOGIN_URL = "https://industrial.omron.eu/en/login"
 MIN_DELAY_SEC = 1.0
 
 
@@ -40,7 +39,7 @@ def _empty_result(part: str, target_url: str, status_label: str) -> list[dict]:
 
 
 async def dismiss_cookie_banner(page):
-    """ปิดแบนเนอร์ Cookie ที่มักจะบังปุ่มต่างๆ"""
+    """ปิดแบนเนอร์ Cookie ที่มักจะบังหน้าจอ"""
     try:
         banner_buttons = page.locator("button#onetrust-accept-btn-handler, .cookie-banner button, button:has-text('Accept All')")
         if await banner_buttons.first.is_visible(timeout=2000):
@@ -50,50 +49,8 @@ async def dismiss_cookie_banner(page):
         pass
 
 
-async def omron_direct_login(page, username, password):
-    """ฟังก์ชันจัดการการ Login ตรงๆ ด้วย Playwright Native Actions"""
-    logger.info("กำลังเปิดหน้า Login...")
-    await page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=40000)
-    await dismiss_cookie_banner(page)
-
-    logger.info("กำลังกรอกข้อมูลเข้าสู่ระบบ...")
-    try:
-        # ใช้ Selector ที่ครอบคลุมหลายรูปแบบ (เผื่อเว็บเปลี่ยนโครงสร้าง)
-        email_selector = 'input[type="email"], input[name="emailAddress"], input[name*="user"], input[id*="email"]'
-        pass_selector = 'input[type="password"], input[name="password"], input[name*="pass"]'
-        submit_selector = 'button[type="submit"], input[type="submit"], button.login-btn, button:has-text("Log in"), button:has-text("Sign in")'
-
-        # รอจนกว่าช่องกรอกอีเมลจะโผล่ขึ้นมา (สูงสุด 15 วินาที)
-        await page.locator(email_selector).first.wait_for(state="visible", timeout=15000)
-        
-        # ค่อยๆ พิมพ์เพื่อจำลองพฤติกรรมมนุษย์ (ลดโอกาสโดนบล็อค)
-        await page.locator(email_selector).first.fill(username)
-        await page.wait_for_timeout(500)
-        
-        await page.locator(pass_selector).first.fill(password)
-        await page.wait_for_timeout(500)
-
-        # กดปุ่มเข้าสู่ระบบ
-        await page.locator(submit_selector).first.click()
-
-        # รอให้หน้าเว็บโหลดหลังจากกด Login เสร็จสมบูรณ์
-        logger.info("กดปุ่ม Login แล้ว กำลังรอระบบตรวจสอบ...")
-        await page.wait_for_load_state("networkidle", timeout=15000)
-        
-        # เช็คว่ามีข้อความ Error รหัสผ่านผิดหรือไม่
-        error_msg = page.locator(".error-message, .alert-danger, .form-error")
-        if await error_msg.first.is_visible(timeout=3000):
-            err_text = await error_msg.first.text_content()
-            raise Exception(f"เข้าสู่ระบบไม่สำเร็จ: {err_text.strip()}")
-
-    except PlaywrightTimeoutError:
-        raise Exception("หน้าเว็บโหลดช้าเกินไป หรือหาช่องกรอก Email/Password ไม่พบ (อาจติดระบบป้องกันอัตโนมัติ)")
-    except Exception as e:
-        raise Exception(str(e))
-
-
 async def search_omron_parts(page, parts_list: list[str]) -> list[dict]:
-    """เข้าหน้าค้นหาและเริ่มค้นหาทีละ Part"""
+    """เข้าหน้าค้นหาและเริ่มค้นหาทีละ Part โดยตรง"""
     all_results = []
     
     logger.info(f"กำลังนำทางไปยังหน้าค้นหา: {SEARCH_BASE_URL}")
@@ -101,8 +58,8 @@ async def search_omron_parts(page, parts_list: list[str]) -> list[dict]:
     await dismiss_cookie_banner(page)
     await page.wait_for_timeout(2000)
 
-    # หาช่องค้นหาบนหน้า Lifecycle (ใช้ Selector ครอบจักรวาล)
-    search_input_selector = 'input[type="text"][placeholder*="search"], input[type="search"], input.search-input, input[id*="search"]'
+    # Selector สำหรับช่องค้นหาจากรูปตัวอย่างของคุณ
+    search_input_selector = 'input[type="text"], input[type="search"], input.search-input, input[placeholder*="search" i]'
 
     for idx, part in enumerate(parts_list):
         try:
@@ -111,25 +68,29 @@ async def search_omron_parts(page, parts_list: list[str]) -> list[dict]:
             search_box = page.locator(search_input_selector).first
             await search_box.wait_for(state="visible", timeout=10000)
             
-            # ล้างค่าเดิมและกรอกใหม่
-            await search_box.fill("")
+            # เคลียร์ค่าเก่าและพิมพ์ Part Number ใหม่ลงไป
+            await search_box.click()
+            await page.keyboard.press("Control+A")
+            await page.keyboard.press("Backspace")
             await search_box.fill(part)
-            await page.wait_for_timeout(500)
+            await page.wait_for_timeout(800)
             
-            # กดปุ่ม Enter เพื่อค้นหา
-            await search_box.press("Enter")
+            # คลิกไอคอนแว่นขยาย หรือกด Enter เพื่อค้นหา
+            search_icon = page.locator('button:has(svg), .search-btn, button[type="submit"]')
+            if await search_icon.first.is_visible(timeout=1500):
+                await search_icon.first.click()
+            else:
+                await search_box.press("Enter")
 
             # รอให้ตารางอัปเดตผลลัพธ์
             try:
-                # รอให้มี tr ปรากฏในตาราง
                 await page.wait_for_selector("table tbody tr", state="visible", timeout=10000)
-                await page.wait_for_timeout(1500) # เผื่อเวลาให้ render ข้อมูลเสร็จ
+                await page.wait_for_timeout(1500) # รอเรนเดอร์ข้อมูล
             except PlaywrightTimeoutError:
-                # ถ้าเกินเวลาแสดงว่าไม่มีข้อมูล
                 all_results.extend(_empty_result(part, SEARCH_BASE_URL, "Not Found (Timeout)"))
                 continue
 
-            # ดึงข้อมูลจากตาราง
+            # ดึงข้อมูลจากตาราง (อิงตามโครงสร้าง Part number, Status, Possible replacement, Discontinuation date)
             rows = await page.locator("table tbody tr").all()
             part_found = False
 
@@ -169,45 +130,39 @@ async def search_omron_parts(page, parts_list: list[str]) -> list[dict]:
 
 @app.get("/", response_class=HTMLResponse)
 async def serve_ui():
-    """หน้าต่าง UI สำหรับกรอก Email, Password และ Part Number"""
+    """หน้า UI แบบเรียบง่าย ไม่ต้องใช้ Login"""
     return """
     <!DOCTYPE html>
     <html lang="th">
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Omron Direct Login Search Tool</title>
+        <title>Omron Part Lifecycle Exporter</title>
         <style>
-            body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; max-width: 650px; margin: 30px auto; padding: 15px; background: #f0f2f5; }
-            .card { background: white; padding: 20px; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); margin-bottom: 15px; }
-            h2 { color: #0056b3; margin-top: 0; font-size: 20px; }
-            h3 { color: #0056b3; margin-top: 0; font-size: 16px; margin-bottom: 15px;}
-            label { font-weight: bold; font-size: 14px; display: block; margin-bottom: 5px; color: #333;}
-            textarea { width: 100%; height: 140px; padding: 10px; border: 1px solid #ccc; border-radius: 6px; box-sizing: border-box; font-family: monospace; font-size: 14px; margin-bottom: 10px;}
-            input[type="text"], input[type="password"], input[type="email"] { width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 6px; box-sizing: border-box; font-size: 14px; margin-bottom: 15px; }
-            button { width: 100%; background: #0056b3; color: white; padding: 12px; border: none; border-radius: 6px; font-weight: bold; font-size: 16px; margin-top: 5px; cursor: pointer; transition: 0.2s;}
+            body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; max-width: 600px; margin: 40px auto; padding: 20px; background: #f0f2f5; }
+            .card { background: white; padding: 25px; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+            h2 { color: #0056b3; margin-top: 0; font-size: 22px; }
+            label { font-weight: bold; font-size: 14px; display: block; margin-bottom: 8px; color: #333; }
+            textarea { width: 100%; height: 180px; padding: 12px; border: 1px solid #ccc; border-radius: 6px; box-sizing: border-box; font-family: monospace; font-size: 14px; margin-bottom: 12px; }
+            button { width: 100%; background: #0056b3; color: white; padding: 14px; border: none; border-radius: 6px; font-weight: bold; font-size: 16px; cursor: pointer; transition: 0.2s; }
             button:hover { background: #004494; }
             button:disabled { background: #aaa; cursor: not-allowed; }
-            .loading { display: none; margin-top: 15px; padding: 10px; background: #e8f4f8; color: #0056b3; border-radius: 6px; font-weight: bold; text-align: center; }
-            .error-box { display: none; margin-top: 15px; padding: 10px; background: #fdecea; color: #b71c1c; border-radius: 6px; font-weight: bold; text-align: center; white-space: pre-wrap; }
-            .success-box { display: none; margin-top: 15px; padding: 10px; background: #e6f4ea; color: #1e7e34; border-radius: 6px; font-weight: bold; text-align: center; }
+            .loading { display: none; margin-top: 15px; padding: 12px; background: #e8f4f8; color: #0056b3; border-radius: 6px; font-weight: bold; text-align: center; }
+            .error-box { display: none; margin-top: 15px; padding: 12px; background: #fdecea; color: #b71c1c; border-radius: 6px; font-weight: bold; text-align: center; white-space: pre-wrap; }
+            .success-box { display: none; margin-top: 15px; padding: 12px; background: #e6f4ea; color: #1e7e34; border-radius: 6px; font-weight: bold; text-align: center; }
+            .hint { font-size: 12px; color: #666; margin-bottom: 15px; }
         </style>
     </head>
     <body>
 
     <div class="card">
-        <h3>🔒 1. เข้าสู่ระบบ Omron Account</h3>
-        <label>Email / Username:</label>
-        <input type="email" id="userInput" placeholder="อีเมลบัญชี Omron ของคุณ">
-        <label>Password:</label>
-        <input type="password" id="passInput" placeholder="รหัสผ่าน">
-    </div>
-
-    <div class="card">
-        <h2>🔎 2. ค้นหา Part Number</h2>
+        <h2>🔎 Omron Part Lifecycle Search</h2>
+        <div class="hint">ระบบดึงข้อมูลสถานะและรุ่นทดแทนจากเว็บไซต์ Omron โดยตรง (ไม่ต้องล็อกอิน)</div>
+        
         <label>ใส่ Part Number ที่ต้องการเช็ค (บรรทัดละ 1 รายการ):</label>
-        <textarea id="partsInput" placeholder="CP1E-E10DR-A\nCP1E-E10DR-D\nCP1E-E10DT-D"></textarea>
-        <button id="submitBtn" onclick="processSearch()">ล็อกอิน & เริ่มค้นหา</button>
+        <textarea id="partsInput" placeholder="CP1E-E10DR-A&#10;CP1E-E14DR-A&#10;E2E-X3D1-M1G"></textarea>
+        
+        <button id="submitBtn" onclick="processSearch()">เริ่มค้นหา & ดาวน์โหลด CSV</button>
 
         <div id="loadingBox" class="loading"></div>
         <div id="errorBox" class="error-box"></div>
@@ -216,11 +171,7 @@ async def serve_ui():
 
     <script>
         async function processSearch() {
-            const username = document.getElementById('userInput').value.trim();
-            const password = document.getElementById('passInput').value.trim();
             const text = document.getElementById('partsInput').value.trim();
-
-            if (!username || !password) return showError('กรุณากรอก Email และ Password ให้ครบถ้วน');
             if (!text) return showError('กรุณากรอก Part Number อย่างน้อย 1 รายการ');
 
             const btn = document.getElementById('submitBtn');
@@ -234,17 +185,13 @@ async def serve_ui():
             errorBox.style.display = 'none';
             successBox.style.display = 'none';
             loading.style.display = 'block';
-            loading.textContent = `⏳ กำลังล็อกอินเข้าสู่ระบบ Omron และค้นหา ${partsCount} รายการ... (อาจใช้เวลา 1-3 นาที)`;
+            loading.textContent = `⏳ กำลังค้นหา ${partsCount} รายการ... (กรุณารอสักครู่)`;
 
             try {
                 const response = await fetch('/search', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                    body: new URLSearchParams({
-                        'username': username,
-                        'password': password,
-                        'part_numbers': text,
-                    })
+                    body: new URLSearchParams({ 'part_numbers': text })
                 });
 
                 if (response.ok) {
@@ -252,13 +199,13 @@ async def serve_ui():
                     const url = window.URL.createObjectURL(blob);
                     const a = document.createElement('a');
                     a.href = url;
-                    a.download = `Omron_Search_${new Date().toISOString().slice(0, 10)}.csv`;
+                    a.download = `Omron_Lifecycle_Report_${new Date().toISOString().slice(0, 10)}.csv`;
                     document.body.appendChild(a);
                     a.click();
                     a.remove();
                     window.URL.revokeObjectURL(url);
 
-                    successBox.textContent = '✓ ค้นหาและสร้างไฟล์ CSV สำเร็จ!';
+                    successBox.textContent = '✓ ค้นหาสำเร็จ ไฟล์ CSV ถูกดาวน์โหลดแล้ว!';
                     successBox.style.display = 'block';
                 } else {
                     let detail = `เกิดข้อผิดพลาด (HTTP ${response.status})`;
@@ -269,7 +216,7 @@ async def serve_ui():
                     showError(detail);
                 }
             } catch (err) {
-                showError('ไม่สามารถเชื่อมต่อระบบได้: ' + err.message);
+                showError('ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์ได้: ' + err.message);
             } finally {
                 btn.disabled = false;
                 loading.style.display = 'none';
@@ -289,27 +236,21 @@ async def serve_ui():
 
 
 @app.post("/search")
-async def process_search_endpoint(
-    username: str = Form(...),
-    password: str = Form(...),
-    part_numbers: str = Form(...),
-):
+async def process_search_endpoint(part_numbers: str = Form(...)):
     parts_list = [p.strip() for p in part_numbers.split("\n") if p.strip()]
     if not parts_list:
         raise HTTPException(status_code=400, detail="ไม่พบข้อมูล Part Number")
 
-    logger.info(f"เริ่มการทำงาน: Direct Login สำหรับบัญชี {username} และค้นหา {len(parts_list)} รายการ")
+    logger.info(f"เริ่มการค้นหาพาร์ทจำนวน {len(parts_list)} รายการ")
 
     async with async_playwright() as p:
-        # เปิด Browser แบบ Headless
-        # (หากในอนาคต Omron ตรวจจับบอทได้ อาจจะต้องเปลี่ยน headless=False แล้วรันบนเครื่อง Local แทนเซิร์ฟเวอร์)
         browser = await p.chromium.launch(
             headless=True,
             args=[
                 "--no-sandbox", 
                 "--disable-setuid-sandbox", 
                 "--disable-dev-shm-usage",
-                "--disable-blink-features=AutomationControlled" # ลดโอกาสถูกจับได้ว่าเป็นบอท
+                "--disable-blink-features=AutomationControlled"
             ]
         )
 
@@ -321,19 +262,15 @@ async def process_search_endpoint(
         page = await context.new_page()
 
         try:
-            # 1. จัดการการล็อกอิน
-            await omron_direct_login(page, username, password)
-            
-            # 2. ทำการค้นหาพาร์ทและเก็บข้อมูล
+            # วิ่งตรงเข้าหน้าค้นหาโดยไม่ต้องผ่านหน้า Login
             all_results = await search_omron_parts(page, parts_list)
-
         except Exception as e:
             logger.error(f"กระบวนการล้มเหลว: {e}")
             raise HTTPException(status_code=500, detail=str(e))
         finally:
             await browser.close()
 
-    # แปลงผลลัพธ์เป็นไฟล์ CSV
+    # สร้างไฟล์ CSV ส่งกลับไปให้ผู้ใช้ดาวน์โหลด
     df = pd.DataFrame(all_results)
     stream = io.StringIO()
     df.to_csv(stream, index=False, encoding="utf-8-sig")
