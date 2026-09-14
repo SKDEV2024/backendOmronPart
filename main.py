@@ -18,8 +18,7 @@ app = FastAPI(title="Omron Part Lifecycle Exporter")
 SEARCH_BASE_URL = "https://industrial.omron.eu/en/services-support/support/product-lifecycle-management"
 STATE_FILE = "omron_auth_state.json"
 
-MIN_DELAY_SEC = 1.0
-MAX_DELAY_SEC = 2.0
+MIN_DELAY_SEC = 0.5
 
 
 def _empty_result(part: str, target_url: str, status_label: str) -> list[dict]:
@@ -34,8 +33,7 @@ def _empty_result(part: str, target_url: str, status_label: str) -> list[dict]:
 
 
 async def get_authenticated_context(browser, username: str = "", password: str = ""):
-    """จัดการ Session ของ Playwright: โหลด Session เดิม หรือทำการ Login ผ่าน Popup Form"""
-    # 1. ลองใช้ Session เดิมก่อน
+    """จัดการ Session ของ Playwright: ใช้ Session เดิม หากไม่มีค่อยล็อกอินใหม่"""
     if os.path.exists(STATE_FILE):
         try:
             context = await browser.new_context(
@@ -62,45 +60,40 @@ async def get_authenticated_context(browser, username: str = "", password: str =
 
     logger.info("กำลังเปิดหน้าเว็บ Omron เพื่อทำการ ล็อกอิน...")
     try:
-        await page.goto(SEARCH_BASE_URL, wait_until="domcontentloaded", timeout=30000)
+        # กำหนด timeout 15 วินาทีเพื่อป้องกัน HTTP 502
+        await page.goto(SEARCH_BASE_URL, wait_until="domcontentloaded", timeout=15000)
 
-        # 1. ปิด Cookie Banner ถ้ามี
+        # ปิด Cookie Banner ถ้ามี
         try:
             cookie_accept = page.locator("#onetrust-accept-btn-handler, button:has-text('Accept')").first
-            if await cookie_accept.is_visible(timeout=3000):
+            if await cookie_accept.is_visible(timeout=2000):
                 await cookie_accept.click()
-                await page.wait_for_timeout(1000)
         except Exception:
             pass
 
-        # 2. แก้ปัญหา Strict Mode โดยใช้ .first เพื่อระบุตัวแรกเมื่อเจอหลาย Element
         email_field = page.get_by_placeholder("Email address").first
         
         if not await email_field.is_visible():
-            logger.info("คลิกปุ่ม Login or register เพื่อเปิด Dropdown Form...")
+            logger.info("คลิกปุ่ม Login or register...")
             trigger_btn = page.get_by_role("button", name="Login or register").or_(
                 page.locator("a:has-text('Login or register')")
             ).first
             await trigger_btn.click(force=True)
-            await email_field.wait_for(state="visible", timeout=10000)
+            await email_field.wait_for(state="visible", timeout=5000)
 
-        # 3. กรอก Email และ Password
-        logger.info("กำลังกรอกข้อมูลเข้าสู่ระบบ...")
+        # กรอกข้อมูลล็อกอิน
         await email_field.fill(username)
-        
         pass_field = page.get_by_placeholder("Password").first
         await pass_field.fill(password)
 
-        # 4. กดปุ่ม 'Log in' สีน้ำเงิน
         login_submit_btn = page.get_by_role("button", name="Log in", exact=True).or_(
             page.locator("button:has-text('Log in')")
         ).first
         await login_submit_btn.click(force=True)
 
-        # รอให้ระบบ Login และสร้าง Cookie
-        await page.wait_for_timeout(4000)
+        await page.wait_for_timeout(2000)
 
-        # บันทึก Session เก็บไว้ใช้งานซ้ำ
+        # บันทึก Session เก็บไว้ใช้ซ้ำ
         await context.storage_state(path=STATE_FILE)
         logger.info("ล็อกอินสำเร็จและบันทึก Session เรียบร้อยแล้ว")
         return context
@@ -114,18 +107,17 @@ async def get_authenticated_context(browser, username: str = "", password: str =
 
 
 async def search_omron_parts_fast(page, parts_list: list[str]) -> list[dict]:
-    """ค้นหาข้อมูล Part Number จากช่อง Product search โดยไม่ต้อง reload หน้าใหม่"""
+    """ค้นหาข้อมูล Part Number แบบรวดเร็ว"""
     all_results = []
     target_url = SEARCH_BASE_URL
 
-    await page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
+    await page.goto(target_url, wait_until="domcontentloaded", timeout=15000)
     
-    # ระบุช่องค้นหาตาม Placeholder หน้าเว็บจริง
     search_input = page.get_by_placeholder("Search by part number, short item code or EAN code").or_(
         page.locator("input[type='search'], input.form-control")
     ).first
 
-    await search_input.wait_for(state="visible", timeout=15000)
+    await search_input.wait_for(state="visible", timeout=10000)
 
     for idx, part in enumerate(parts_list):
         try:
@@ -135,8 +127,7 @@ async def search_omron_parts_fast(page, parts_list: list[str]) -> list[dict]:
             await search_input.fill(part)
             await search_input.press("Enter")
 
-            # รอผลลัพธ์การค้นหา
-            await page.wait_for_timeout(2500)
+            await page.wait_for_timeout(1500)
 
             page_num = 1
             part_found = False
@@ -168,13 +159,12 @@ async def search_omron_parts_fast(page, parts_list: list[str]) -> list[dict]:
                         })
                         part_found = True
 
-                # ระบบเปลี่ยนหน้า (Pagination)
+                # Pagination
                 next_button = await page.query_selector("ul.pagination li.next:not(.disabled) a, a.next-page, button.btn-next")
                 if next_button and await next_button.is_visible():
                     page_num += 1
-                    logger.info(f"[{part}] กำลังดึงข้อมูลหน้า {page_num}...")
                     await next_button.click()
-                    await page.wait_for_timeout(2000)
+                    await page.wait_for_timeout(1500)
                 else:
                     break
 
@@ -191,9 +181,6 @@ async def search_omron_parts_fast(page, parts_list: list[str]) -> list[dict]:
     return all_results
 
 
-# ---------------------------------------------------------
-# Front-end UI (เสิร์ฟผ่าน /)
-# ---------------------------------------------------------
 @app.get("/", response_class=HTMLResponse)
 async def serve_ui():
     html_content = """
@@ -226,12 +213,12 @@ async def serve_ui():
         <input type="email" id="userInput" placeholder="อีเมลบัญชี Omron ของคุณ">
         <label>Password:</label>
         <input type="password" id="passInput" placeholder="รหัสผ่าน Omron">
-        <div class="hint">* หากเคยล็อกอินสำเร็จแล้ว ระบบจะใช้ Session เดิมอัตโนมัติ</div>
+        <div class="hint">* ล็อกอินเพียงครั้งแรก ครั้งถัดไประบบจะใช้ Session เดิมอัตโนมัติ</div>
     </div>
 
     <div class="card">
         <h2>🔎 ค้นหา Part Number</h2>
-        <p>ใส่ Part Number ที่ต้องการเช็ค (บรรทัดละ 1 รายการ):</p>
+        <p>ใส่ Part Number ที่ต้องการเช็ค (แนะนำครั้งละไม่เกิน 5-10 รายการเพื่อป้องกัน Timeout):</p>
         <textarea id="partsInput" placeholder="CP1E-E10DR-A&#10;CP1E-E10DR-D&#10;CP1E-E10DT-D"></textarea>
         <button id="submitBtn" onclick="processSearch()">เริ่มค้นหา & โหลด CSV</button>
 
@@ -313,9 +300,6 @@ async def serve_ui():
     return html_content
 
 
-# ---------------------------------------------------------
-# Back-end API Endpoint (/search)
-# ---------------------------------------------------------
 @app.post("/search")
 async def search_omron_parts(
     username: str = Form(""),
