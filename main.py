@@ -17,7 +17,6 @@ app = FastAPI(title="Omron Part Lifecycle Exporter")
 
 SEARCH_BASE_URL = "https://industrial.omron.eu/en/services-support/support/product-lifecycle-management"
 STATE_FILE = "omron_auth_state.json"
-
 MIN_DELAY_SEC = 0.5
 
 
@@ -33,7 +32,9 @@ def _empty_result(part: str, target_url: str, status_label: str) -> list[dict]:
 
 
 async def get_authenticated_context(browser, username: str = "", password: str = ""):
-    """จัดการ Session ของ Playwright: ใช้ Session เดิม หากไม่มีค่อยล็อกอินใหม่"""
+    """จัดการ Session ของ Playwright: เช็ค Session เดิม หากไม่มีหรือไม่ผ่าน ค่อยเปิดหน้า Login"""
+    
+    # 1. ตรวจสอบ Session เดิมจาก storage_state
     if os.path.exists(STATE_FILE):
         try:
             context = await browser.new_context(
@@ -41,80 +42,104 @@ async def get_authenticated_context(browser, username: str = "", password: str =
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                 viewport={"width": 1280, "height": 800}
             )
-            logger.info("ใช้งาน Session เดิมจาก storage_state")
-            return context
+            
+            check_page = await context.new_page()
+            await check_page.goto(SEARCH_BASE_URL, wait_until="domcontentloaded", timeout=15000)
+            
+            # ตรวจสอบว่ามี element ที่บ่งบอกสถานะการเข้าสู่ระบบหรือไม่
+            is_logged_in = await check_page.locator("a:has-text('Logout'), a:has-text('Sign out'), .my-account, button:has-text('Account')").first.is_visible(timeout=3000)
+            await check_page.close()
+            
+            if is_logged_in:
+                logger.info("ใช้งาน Session เดิมจาก storage_state สำเร็จ")
+                return context
+            else:
+                logger.warning("Session เดิมหมดอายุ กำลังเข้าสู่ระบบใหม่...")
+                await context.close()
+                if os.path.exists(STATE_FILE):
+                    os.remove(STATE_FILE)
         except Exception as e:
-            logger.warning(f"Session เดิมใช้ไม่ได้: {e}")
+            logger.warning(f"ตรวจสอบ Session เดิมล้มเหลว: {e}")
+            if os.path.exists(STATE_FILE):
+                os.remove(STATE_FILE)
 
+    # 2. กรณีไม่มี Session ให้ตรวจสอบ Credentials
     if not username or not password:
         raise HTTPException(
             status_code=400,
-            detail="ยังไม่มี Session กรุณากรอก Email และ Password เพื่อล็อกอิน"
+            detail="ไม่พบ Session หรือ Session หมดอายุ กรุณากรอก Email และ Password เพื่อเข้าสู่ระบบ"
         )
 
+    # 3. ดำเนินการ Log in ใหม่
     context = await browser.new_context(
         user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         viewport={"width": 1280, "height": 800}
     )
     page = await context.new_page()
 
-    logger.info("กำลังเปิดหน้าเว็บ Omron เพื่อทำการ ล็อกอิน...")
+    logger.info("กำลังเปิดหน้าเว็บ Omron เพื่อเข้าสู่ระบบ...")
     try:
-        # กำหนด timeout 15 วินาทีเพื่อป้องกัน HTTP 502
-        await page.goto(SEARCH_BASE_URL, wait_until="domcontentloaded", timeout=15000)
+        await page.goto(SEARCH_BASE_URL, wait_until="domcontentloaded", timeout=20000)
 
-        # ปิด Cookie Banner ถ้ามี
+        # ปิด Cookie Banner (OneTrust / Cookiebot)
         try:
-            cookie_accept = page.locator("#onetrust-accept-btn-handler, button:has-text('Accept')").first
-            if await cookie_accept.is_visible(timeout=2000):
-                await cookie_accept.click()
+            cookie_accept = page.locator("#onetrust-accept-btn-handler, button#accept-recommended-btn-handler, button:has-text('Accept All')").first
+            await cookie_accept.wait_for(state="visible", timeout=4000)
+            await cookie_accept.click(force=True)
+            logger.info("ปิด Cookie Banner เรียบร้อย")
         except Exception:
             pass
 
-        email_field = page.get_by_placeholder("Email address").first
+        # Trigger เปิดหน้า/Modal Login
+        email_field = page.locator("input[type='email'], input[name='username'], input[placeholder*='Email']").first
         
         if not await email_field.is_visible():
-            logger.info("คลิกปุ่ม Login or register...")
-            trigger_btn = page.get_by_role("button", name="Login or register").or_(
-                page.locator("a:has-text('Login or register')")
-            ).first
-            await trigger_btn.click(force=True)
-            await email_field.wait_for(state="visible", timeout=5000)
+            logger.info("กดเปิดปุ่ม Login/Register...")
+            login_trigger = page.locator("a:has-text('Login'), button:has-text('Login'), a:has-text('Sign in'), .login-btn").first
+            await login_trigger.click(force=True)
+            await email_field.wait_for(state="visible", timeout=8000)
 
-        # กรอกข้อมูลล็อกอิน
+        logger.info("กำลังกรอกข้อมูล Login...")
         await email_field.fill(username)
-        pass_field = page.get_by_placeholder("Password").first
+        
+        pass_field = page.locator("input[type='password'], input[name='password']").first
         await pass_field.fill(password)
 
-        login_submit_btn = page.get_by_role("button", name="Log in", exact=True).or_(
-            page.locator("button:has-text('Log in')")
-        ).first
-        await login_submit_btn.click(force=True)
+        login_submit_btn = page.locator("button[type='submit']:has-text('Log in'), button:has-text('Login'), input[type='submit']").first
+        
+        async with page.expect_navigation(wait_until="domcontentloaded", timeout=15000):
+            await login_submit_btn.click(force=True)
 
         await page.wait_for_timeout(2000)
 
-        # บันทึก Session เก็บไว้ใช้ซ้ำ
+        # ตรวจสอบ Error ในหน้าเว็บ
+        error_msg = page.locator(".error-message, .alert-danger, .form-error").first
+        if await error_msg.is_visible(timeout=2000):
+            err_text = await error_msg.text_content()
+            raise Exception(f"Omron ตอบกลับ: {err_text.strip()}")
+
         await context.storage_state(path=STATE_FILE)
-        logger.info("ล็อกอินสำเร็จและบันทึก Session เรียบร้อยแล้ว")
+        logger.info("เข้าสู่ระบบสำเร็จและบันทึก Session ใหม่เรียบร้อยแล้ว")
         return context
 
     except Exception as e:
-        logger.error(f"การล็อกอินล้มเหลว: {e}")
+        logger.error(f"การเข้าสู่ระบบล้มเหลว: {e}")
+        await context.close()
         raise HTTPException(
             status_code=400,
-            detail=f"ล็อกอินไม่สำเร็จ ตรวจสอบ Email/Password หรือลองอีกครั้ง: {str(e)[:150]}"
+            detail=f"เข้าสู่ระบบไม่สำเร็จ: {str(e)[:150]}"
         )
 
 
 async def search_omron_parts_fast(page, parts_list: list[str]) -> list[dict]:
-    """ค้นหาข้อมูล Part Number แบบรวดเร็ว"""
+    """ค้นหาข้อมูล Part Number บนหน้าเว็บและอ่านตารางผลลัพธ์"""
     all_results = []
     target_url = SEARCH_BASE_URL
 
-    await page.goto(target_url, wait_until="domcontentloaded", timeout=15000)
+    await page.goto(target_url, wait_until="domcontentloaded", timeout=20000)
     
     search_input = page.get_by_placeholder("Search by part number, short item code or EAN code").or_(
-        page.locator("input[type='search'], input.form-control")
+        page.locator("input[type='search'], input[name='query'], input.form-control")
     ).first
 
     await search_input.wait_for(state="visible", timeout=10000)
