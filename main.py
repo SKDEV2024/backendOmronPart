@@ -97,7 +97,6 @@ async def get_authenticated_context_and_page(browser, username: str = "", passwo
 
         logger.info("กำลังกรอก Email และ Password (ผ่าน JS DOM)...")
         
-        # ใช้ JavaScript ค้นหาและกรอกค่าลง Input โดยตรง ตัดปัญหา Element is not visible ทิ้งไป
         login_success = await page.evaluate(f"""
             ([user, pwd]) => {{
                 const emailInput = document.querySelector('input[name="emailAddress"], input[type="email"], input[name*="user"], input[placeholder*="Email"]');
@@ -164,19 +163,19 @@ async def get_authenticated_context_and_page(browser, username: str = "", passwo
 
 
 async def search_omron_parts_fast(page, parts_list: list[str]) -> list[dict]:
-    """ค้นหาข้อมูล Part Number โดยใช้ JavaScript DOM"""
+    """ค้นหาข้อมูล Part Number โดยใช้ JavaScript DOM และรอโหลดหน้าเว็บอย่างสมบูรณ์"""
     all_results = []
     target_url = SEARCH_BASE_URL
 
     if SEARCH_BASE_URL not in page.url:
         logger.info("กำลังนำทางไปยังหน้า Search...")
         try:
-            await page.goto(target_url, wait_until="commit", timeout=40000)
-            await page.wait_for_load_state("domcontentloaded", timeout=15000)
+            await page.goto(target_url, wait_until="networkidle", timeout=50000)
         except Exception as err:
-            logger.warning(f"การโหลดหน้า Search ใช้เวลานานเกินกำหนด แต่จะพยายามค้นหาต่อ: {err}")
-
-    # เคลียร์ Banner
+            logger.warning(f"การโหลดหน้า Search แบบ networkidle ใช้เวลานาน แต่จะลองดำเนินการต่อ: {err}")
+    
+    # เคลียร์ Banner และรอให้ body โหลดเสร็จ
+    await page.wait_for_timeout(3000)
     await page.evaluate("""
         () => {
             const elements = document.querySelectorAll('#onetrust-consent-sdk, #onetrust-banner-sdk, .cookie-banner');
@@ -185,9 +184,10 @@ async def search_omron_parts_fast(page, parts_list: list[str]) -> list[dict]:
     """)
 
     try:
-        await page.wait_for_selector("input", timeout=15000)
+        # รอให้ช่อง input สำหรับค้นหาปรากฏขึ้นมา (สูงสุด 30 วินาที)
+        await page.wait_for_selector("input[type='text'], input[type='search'], input", timeout=30000)
     except Exception:
-        logger.error("ไม่พบ Element ใดๆ บนหน้าเว็บ")
+        logger.error("ไม่พบ Element ช่องค้นหาบนหน้าเว็บ")
         for part in parts_list:
             all_results.extend(_empty_result(part, target_url, "Page Load Error"))
         return all_results
@@ -198,13 +198,15 @@ async def search_omron_parts_fast(page, parts_list: list[str]) -> list[dict]:
             
             search_triggered = await page.evaluate("""
                 (partText) => {
-                    const inputs = Array.from(document.querySelectorAll('input[type="text"], input[type="search"], input'));
+                    const inputs = Array.from(document.querySelectorAll('input'));
                     const searchInput = inputs.find(el => {
                         const ph = (el.placeholder || '').toLowerCase();
                         const name = (el.name || '').toLowerCase();
                         const id = (el.id || '').toLowerCase();
                         const cls = (el.className || '').toLowerCase();
-                        return ph.includes('search') || ph.includes('part') || name.includes('query') || name.includes('search') || id.includes('search') || cls.includes('search');
+                        return ph.includes('search') || ph.includes('part') || ph.includes('model') || 
+                               name.includes('query') || name.includes('search') || name.includes('keyword') ||
+                               id.includes('search') || cls.includes('search');
                     }) || document.querySelector('input[type="search"]') || document.querySelector('input[type="text"]');
 
                     if (searchInput) {
@@ -222,11 +224,10 @@ async def search_omron_parts_fast(page, parts_list: list[str]) -> list[dict]:
                             } else {
                                 form.submit();
                             }
-                            return true;
                         } else {
                             searchInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
-                            return true;
                         }
+                        return true;
                     }
                     return false;
                 }
@@ -236,7 +237,8 @@ async def search_omron_parts_fast(page, parts_list: list[str]) -> list[dict]:
                 all_results.extend(_empty_result(part, target_url, "Search Input Not Found via JS"))
                 continue
 
-            await page.wait_for_timeout(2500)
+            # รอผลการค้นหาแสดงขึ้นมาในตาราง
+            await page.wait_for_timeout(3500)
 
             page_num = 1
             part_found = False
