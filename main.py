@@ -16,6 +16,7 @@ logger = logging.getLogger("omron-part-search")
 app = FastAPI(title="Omron Part Lifecycle Exporter")
 
 SEARCH_BASE_URL = "https://industrial.omron.eu/en/services-support/support/product-lifecycle-management"
+LOGIN_URL = "https://industrial.omron.eu/en/login"
 STATE_FILE = "omron_auth_state.json"
 MIN_DELAY_SEC = 0.5
 
@@ -32,9 +33,9 @@ def _empty_result(part: str, target_url: str, status_label: str) -> list[dict]:
 
 
 async def get_authenticated_context(browser, username: str = "", password: str = ""):
-    """จัดการ Session ของ Playwright: เช็ค Session เดิม หากไม่มีหรือไม่ผ่าน ค่อยเปิดหน้า Login"""
+    """จัดการ Session ของ Playwright: ตรวจสอบ Session เดิม หรือ Login ใหม่แบบเลี่ยง Overlay"""
     
-    # 1. ตรวจสอบ Session เดิมจาก storage_state
+    # 1. เช็ค Session เดิมจากไฟล์ storage_state
     if os.path.exists(STATE_FILE):
         try:
             context = await browser.new_context(
@@ -46,7 +47,7 @@ async def get_authenticated_context(browser, username: str = "", password: str =
             check_page = await context.new_page()
             await check_page.goto(SEARCH_BASE_URL, wait_until="domcontentloaded", timeout=15000)
             
-            # ตรวจสอบว่ามี element ที่บ่งบอกสถานะการเข้าสู่ระบบหรือไม่
+            # ตรวจสอบว่ามี element ที่บ่งบอกสถานะการเข้าสู่ระบบ
             is_logged_in = await check_page.locator("a:has-text('Logout'), a:has-text('Sign out'), .my-account, button:has-text('Account')").first.is_visible(timeout=3000)
             await check_page.close()
             
@@ -63,63 +64,64 @@ async def get_authenticated_context(browser, username: str = "", password: str =
             if os.path.exists(STATE_FILE):
                 os.remove(STATE_FILE)
 
-    # 2. กรณีไม่มี Session ให้ตรวจสอบ Credentials
+    # 2. ตรวจสอบ Credentials หากต้อง Login ใหม่
     if not username or not password:
         raise HTTPException(
             status_code=400,
             detail="ไม่พบ Session หรือ Session หมดอายุ กรุณากรอก Email และ Password เพื่อเข้าสู่ระบบ"
         )
 
-    # 3. ดำเนินการ Log in ใหม่
+    # 3. เริ่มขั้นตอน Login ใหม่
     context = await browser.new_context(
         user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         viewport={"width": 1280, "height": 800}
     )
     page = await context.new_page()
 
-    logger.info("กำลังเปิดหน้าเว็บ Omron เพื่อเข้าสู่ระบบ...")
+    logger.info("กำลังเปิดหน้า Login ของ Omron...")
     try:
-        await page.goto(SEARCH_BASE_URL, wait_until="domcontentloaded", timeout=20000)
+        await page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=20000)
 
-        # ปิด Cookie Banner (OneTrust / Cookiebot)
-        try:
-            cookie_accept = page.locator("#onetrust-accept-btn-handler, button#accept-recommended-btn-handler, button:has-text('Accept All')").first
-            await cookie_accept.wait_for(state="visible", timeout=4000)
-            await cookie_accept.click(force=True)
-            logger.info("ปิด Cookie Banner เรียบร้อย")
-        except Exception:
-            pass
+        # ลบ Cookie Banner ทิ้งด้วย JavaScript เพื่อป้องกันการบัง Element
+        await page.evaluate("""
+            () => {
+                const elements = document.querySelectorAll('#onetrust-consent-sdk, #onetrust-banner-sdk, .cookie-banner');
+                elements.forEach(el => el.remove());
+            }
+        """)
 
-        # Trigger เปิดหน้า/Modal Login
+        # ค้นหาช่อง Email
         email_field = page.locator("input[type='email'], input[name='username'], input[placeholder*='Email']").first
-        
-        if not await email_field.is_visible():
-            logger.info("กดเปิดปุ่ม Login/Register...")
-            login_trigger = page.locator("a:has-text('Login'), button:has-text('Login'), a:has-text('Sign in'), .login-btn").first
-            await login_trigger.click(force=True)
-            await email_field.wait_for(state="visible", timeout=8000)
+        await email_field.wait_for(state="visible", timeout=10000)
 
-        logger.info("กำลังกรอกข้อมูล Login...")
+        logger.info("กำลังกรอก Email และ Password...")
         await email_field.fill(username)
         
         pass_field = page.locator("input[type='password'], input[name='password']").first
         await pass_field.fill(password)
 
-        login_submit_btn = page.locator("button[type='submit']:has-text('Log in'), button:has-text('Login'), input[type='submit']").first
+        login_submit_btn = page.locator("button[type='submit'], input[type='submit'], button:has-text('Log in')").first
         
-        async with page.expect_navigation(wait_until="domcontentloaded", timeout=15000):
-            await login_submit_btn.click(force=True)
+        # กด Login
+        try:
+            async with page.expect_navigation(wait_until="domcontentloaded", timeout=15000):
+                await login_submit_btn.click(force=True)
+        except Exception:
+            # สำรองกรณีคลิกปกติแล้วไม่ติด ใช้ JavaScript Trigger Click
+            await page.evaluate("btn => btn.click()", await login_submit_btn.element_handle())
+            await page.wait_for_load_state("domcontentloaded")
 
         await page.wait_for_timeout(2000)
 
-        # ตรวจสอบ Error ในหน้าเว็บ
-        error_msg = page.locator(".error-message, .alert-danger, .form-error").first
+        # ตรวจสอบ Error Message บนหน้าเว็บ
+        error_msg = page.locator(".error-message, .alert-danger, .form-error, .invalid-feedback").first
         if await error_msg.is_visible(timeout=2000):
             err_text = await error_msg.text_content()
             raise Exception(f"Omron ตอบกลับ: {err_text.strip()}")
 
+        # บันทึก Session
         await context.storage_state(path=STATE_FILE)
-        logger.info("เข้าสู่ระบบสำเร็จและบันทึก Session ใหม่เรียบร้อยแล้ว")
+        logger.info("เข้าสู่ระบบสำเร็จและบันทึก Session เรียบร้อยแล้ว")
         return context
 
     except Exception as e:
@@ -132,12 +134,20 @@ async def get_authenticated_context(browser, username: str = "", password: str =
 
 
 async def search_omron_parts_fast(page, parts_list: list[str]) -> list[dict]:
-    """ค้นหาข้อมูล Part Number บนหน้าเว็บและอ่านตารางผลลัพธ์"""
+    """ค้นหาข้อมูล Part Number และ ดึงข้อมูลใส่ List"""
     all_results = []
     target_url = SEARCH_BASE_URL
 
     await page.goto(target_url, wait_until="domcontentloaded", timeout=20000)
     
+    # ลบ Cookie Banner หน้าค้นหาถ้ามี
+    await page.evaluate("""
+        () => {
+            const elements = document.querySelectorAll('#onetrust-consent-sdk, #onetrust-banner-sdk, .cookie-banner');
+            elements.forEach(el => el.remove());
+        }
+    """)
+
     search_input = page.get_by_placeholder("Search by part number, short item code or EAN code").or_(
         page.locator("input[type='search'], input[name='query'], input.form-control")
     ).first
@@ -188,7 +198,7 @@ async def search_omron_parts_fast(page, parts_list: list[str]) -> list[dict]:
                 next_button = await page.query_selector("ul.pagination li.next:not(.disabled) a, a.next-page, button.btn-next")
                 if next_button and await next_button.is_visible():
                     page_num += 1
-                    await next_button.click()
+                    await next_button.click(force=True)
                     await page.wait_for_timeout(1500)
                 else:
                     break
@@ -243,7 +253,7 @@ async def serve_ui():
 
     <div class="card">
         <h2>🔎 ค้นหา Part Number</h2>
-        <p>ใส่ Part Number ที่ต้องการเช็ค (แนะนำครั้งละไม่เกิน 5-10 รายการเพื่อป้องกัน Timeout):</p>
+        <p>ใส่ Part Number ที่ต้องการเช็ค (แนะนำครั้งละไม่เกิน 5-10 รายการ):</p>
         <textarea id="partsInput" placeholder="CP1E-E10DR-A&#10;CP1E-E10DR-D&#10;CP1E-E10DT-D"></textarea>
         <button id="submitBtn" onclick="processSearch()">เริ่มค้นหา & โหลด CSV</button>
 
