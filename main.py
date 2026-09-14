@@ -163,19 +163,22 @@ async def get_authenticated_context_and_page(browser, username: str = "", passwo
 
 
 async def search_omron_parts_fast(page, parts_list: list[str]) -> list[dict]:
-    """ค้นหาข้อมูล Part Number โดยใช้ JavaScript DOM และรอโหลดหน้าเว็บอย่างสมบูรณ์"""
+    """ค้นหาข้อมูล Part Number แบบยืดหยุ่น ป้องกัน Error หน้าเว็บโหลดไม่ทัน"""
     all_results = []
     target_url = SEARCH_BASE_URL
 
     if SEARCH_BASE_URL not in page.url:
         logger.info("กำลังนำทางไปยังหน้า Search...")
         try:
-            await page.goto(target_url, wait_until="networkidle", timeout=50000)
-        except Exception as err:
-            logger.warning(f"การโหลดหน้า Search แบบ networkidle ใช้เวลานาน แต่จะลองดำเนินการต่อ: {err}")
-    
-    # เคลียร์ Banner และรอให้ body โหลดเสร็จ
-    await page.wait_for_timeout(3000)
+            await page.goto(target_url, wait_until="commit", timeout=30000)
+            await page.wait_for_load_state("domcontentloaded", timeout=10000)
+        except Exception:
+            pass  # ข้ามความผิดพลาดเรื่องโหลดหน้าเว็บแล้วปล่อยให้ Script พยายามหา Input ต่อทันที
+
+    # รอเล็กน้อยให้หน้าเว็บเรนเดอร์ Element พื้นฐาน
+    await page.wait_for_timeout(2000)
+
+    # เคลียร์ Banner
     await page.evaluate("""
         () => {
             const elements = document.querySelectorAll('#onetrust-consent-sdk, #onetrust-banner-sdk, .cookie-banner');
@@ -183,19 +186,11 @@ async def search_omron_parts_fast(page, parts_list: list[str]) -> list[dict]:
         }
     """)
 
-    try:
-        # รอให้ช่อง input สำหรับค้นหาปรากฏขึ้นมา (สูงสุด 30 วินาที)
-        await page.wait_for_selector("input[type='text'], input[type='search'], input", timeout=30000)
-    except Exception:
-        logger.error("ไม่พบ Element ช่องค้นหาบนหน้าเว็บ")
-        for part in parts_list:
-            all_results.extend(_empty_result(part, target_url, "Page Load Error"))
-        return all_results
-
     for idx, part in enumerate(parts_list):
         try:
             logger.info(f"[{part}] กำลังค้นหา... ({idx+1}/{len(parts_list)})")
             
+            # ค้นหาช่อง input และกรอกข้อความทันที (ไม่ใช้ wait_for_selector ที่ทำให้ติด Timeout)
             search_triggered = await page.evaluate("""
                 (partText) => {
                     const inputs = Array.from(document.querySelectorAll('input'));
@@ -207,7 +202,7 @@ async def search_omron_parts_fast(page, parts_list: list[str]) -> list[dict]:
                         return ph.includes('search') || ph.includes('part') || ph.includes('model') || 
                                name.includes('query') || name.includes('search') || name.includes('keyword') ||
                                id.includes('search') || cls.includes('search');
-                    }) || document.querySelector('input[type="search"]') || document.querySelector('input[type="text"]');
+                    }) || document.querySelector('input[type="search"]') || document.querySelector('input[type="text"]') || document.querySelector('input');
 
                     if (searchInput) {
                         searchInput.focus();
@@ -234,11 +229,11 @@ async def search_omron_parts_fast(page, parts_list: list[str]) -> list[dict]:
             """, part)
 
             if not search_triggered:
-                all_results.extend(_empty_result(part, target_url, "Search Input Not Found via JS"))
+                all_results.extend(_empty_result(part, target_url, "Search Input Not Found"))
                 continue
 
             # รอผลการค้นหาแสดงขึ้นมาในตาราง
-            await page.wait_for_timeout(3500)
+            await page.wait_for_timeout(3000)
 
             page_num = 1
             part_found = False
@@ -289,7 +284,6 @@ async def search_omron_parts_fast(page, parts_list: list[str]) -> list[dict]:
             await asyncio.sleep(MIN_DELAY_SEC)
 
     return all_results
-
 
 @app.get("/", response_class=HTMLResponse)
 async def serve_ui():
