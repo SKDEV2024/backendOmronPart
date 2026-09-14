@@ -66,40 +66,41 @@ async def get_authenticated_context(browser, username: str = "", password: str =
 
         # 1. ปิด Cookie Banner ถ้ามี
         try:
-            cookie_accept = page.locator("#onetrust-accept-btn-handler, button:has-text('Accept')")
+            cookie_accept = page.locator("#onetrust-accept-btn-handler, button:has-text('Accept')").first
             if await cookie_accept.is_visible(timeout=3000):
                 await cookie_accept.click()
                 await page.wait_for_timeout(1000)
         except Exception:
             pass
 
-        # 2. ตรวจสอบว่า Popup ล็อกอินเปิดอยู่หรือยัง
-        email_field = page.get_by_placeholder("Email address")
+        # 2. แก้ปัญหา Strict Mode โดยใช้ .first เพื่อระบุตัวแรกเมื่อเจอหลาย Element
+        email_field = page.get_by_placeholder("Email address").first
         
         if not await email_field.is_visible():
-            # ถ้ายังไม่เปิด ให้กดปุ่ม Login or register ด้านบน
             logger.info("คลิกปุ่ม Login or register เพื่อเปิด Dropdown Form...")
             trigger_btn = page.get_by_role("button", name="Login or register").or_(
                 page.locator("a:has-text('Login or register')")
-            )
-            await trigger_btn.first.click(force=True)
+            ).first
+            await trigger_btn.click(force=True)
             await email_field.wait_for(state="visible", timeout=10000)
 
-        # 3. กรอก Email และ Password ตาม placeholder หน้าเว็บจริง
+        # 3. กรอก Email และ Password
         logger.info("กำลังกรอกข้อมูลเข้าสู่ระบบ...")
         await email_field.fill(username)
         
-        pass_field = page.get_by_placeholder("Password")
+        pass_field = page.get_by_placeholder("Password").first
         await pass_field.fill(password)
 
         # 4. กดปุ่ม 'Log in' สีน้ำเงิน
-        login_submit_btn = page.get_by_role("button", name="Log in", exact=True)
+        login_submit_btn = page.get_by_role("button", name="Log in", exact=True).or_(
+            page.locator("button:has-text('Log in')")
+        ).first
         await login_submit_btn.click(force=True)
 
         # รอให้ระบบ Login และสร้าง Cookie
         await page.wait_for_timeout(4000)
 
-        # บันทึก Session เก็บไว้
+        # บันทึก Session เก็บไว้ใช้งานซ้ำ
         await context.storage_state(path=STATE_FILE)
         logger.info("ล็อกอินสำเร็จและบันทึก Session เรียบร้อยแล้ว")
         return context
@@ -113,13 +114,13 @@ async def get_authenticated_context(browser, username: str = "", password: str =
 
 
 async def search_omron_parts_fast(page, parts_list: list[str]) -> list[dict]:
-    """ค้นหาข้อมูล Part Number จากช่อง Product search โดยไม่ต้อง reload หน้า"""
+    """ค้นหาข้อมูล Part Number จากช่อง Product search โดยไม่ต้อง reload หน้าใหม่"""
     all_results = []
     target_url = SEARCH_BASE_URL
 
     await page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
     
-    # ระบุช่องค้นหาจาก Placeholder หน้าจริง: "Search by part number, short item code or EAN code"
+    # ระบุช่องค้นหาตาม Placeholder หน้าเว็บจริง
     search_input = page.get_by_placeholder("Search by part number, short item code or EAN code").or_(
         page.locator("input[type='search'], input.form-control")
     ).first
@@ -134,7 +135,7 @@ async def search_omron_parts_fast(page, parts_list: list[str]) -> list[dict]:
             await search_input.fill(part)
             await search_input.press("Enter")
 
-            # รอผลลัพธ์โหลด
+            # รอผลลัพธ์การค้นหา
             await page.wait_for_timeout(2500)
 
             page_num = 1
