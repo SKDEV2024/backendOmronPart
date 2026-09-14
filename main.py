@@ -1,4 +1,3 @@
-import os
 import io
 import logging
 import asyncio
@@ -25,8 +24,6 @@ app.add_middleware(
 )
 
 SEARCH_BASE_URL = "https://industrial.omron.eu/en/services-support/support/product-lifecycle-management"
-LOGIN_URL = "https://industrial.omron.eu/en/login"
-USER_DATA_DIR = "./omron_browser_profile"
 MIN_DELAY_SEC = 1.0
 
 
@@ -42,7 +39,7 @@ def _empty_result(part: str, target_url: str, status_label: str) -> list[dict]:
 
 
 async def dismiss_cookie_banner(page):
-    """ปิดแบนเนอร์ Cookie"""
+    """ปิดแบนเนอร์ Cookie ของหน้าเว็บ"""
     try:
         banner_buttons = page.locator("button#onetrust-accept-btn-handler, .cookie-banner button, button:has-text('Accept All')")
         if await banner_buttons.first.is_visible(timeout=2000):
@@ -60,35 +57,42 @@ async def serve_ui():
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Omron Part Search Tool</title>
+        <title>Omron Part Search Tool (Cloud Version)</title>
         <style>
-            body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; max-width: 600px; margin: 40px auto; padding: 20px; background: #f0f2f5; }
-            .card { background: white; padding: 25px; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); margin-bottom: 15px; }
+            body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; max-width: 650px; margin: 30px auto; padding: 15px; background: #f0f2f5; }
+            .card { background: white; padding: 20px; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); margin-bottom: 15px; }
             h2 { color: #0056b3; margin-top: 0; font-size: 20px; }
             h3 { color: #0056b3; margin-top: 0; font-size: 15px; }
-            label { font-weight: bold; font-size: 14px; display: block; margin-bottom: 8px; color: #333; }
-            textarea { width: 100%; height: 160px; padding: 12px; border: 1px solid #ccc; border-radius: 6px; box-sizing: border-box; font-family: monospace; font-size: 14px; margin-bottom: 12px; }
-            button { width: 100%; background: #0056b3; color: white; padding: 14px; border: none; border-radius: 6px; font-weight: bold; font-size: 16px; cursor: pointer; transition: 0.2s; }
+            label { font-weight: bold; font-size: 14px; display: block; margin-bottom: 6px; color: #333; }
+            textarea { width: 100%; height: 130px; padding: 10px; border: 1px solid #ccc; border-radius: 6px; box-sizing: border-box; font-family: monospace; font-size: 14px; margin-bottom: 10px; }
+            input[type="text"] { width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 6px; box-sizing: border-box; font-family: monospace; font-size: 13px; margin-bottom: 10px; }
+            button { width: 100%; background: #0056b3; color: white; padding: 12px; border: none; border-radius: 6px; font-weight: bold; font-size: 16px; cursor: pointer; transition: 0.2s; }
             button:hover { background: #004494; }
             button:disabled { background: #aaa; cursor: not-allowed; }
-            .btn-login { background: #28a745; margin-bottom: 15px; }
-            .btn-login:hover { background: #218838; }
-            .loading { display: none; margin-top: 15px; padding: 12px; background: #e8f4f8; color: #0056b3; border-radius: 6px; font-weight: bold; text-align: center; }
-            .error-box { display: none; margin-top: 15px; padding: 12px; background: #fdecea; color: #b71c1c; border-radius: 6px; font-weight: bold; text-align: center; white-space: pre-wrap; }
-            .success-box { display: none; margin-top: 15px; padding: 12px; background: #e6f4ea; color: #1e7e34; border-radius: 6px; font-weight: bold; text-align: center; }
-            .steps { font-size: 13px; color: #555; line-height: 1.6; padding-left: 18px; margin: 5px 0 15px 0; }
+            .loading { display: none; margin-top: 15px; padding: 10px; background: #e8f4f8; color: #0056b3; border-radius: 6px; font-weight: bold; text-align: center; }
+            .error-box { display: none; margin-top: 15px; padding: 10px; background: #fdecea; color: #b71c1c; border-radius: 6px; font-weight: bold; text-align: center; white-space: pre-wrap; }
+            .success-box { display: none; margin-top: 15px; padding: 10px; background: #e6f4ea; color: #1e7e34; border-radius: 6px; font-weight: bold; text-align: center; }
+            .steps { font-size: 13px; color: #555; line-height: 1.6; padding-left: 18px; margin: 5px 0; }
+            .steps code { background: #f0f2f5; padding: 2px 5px; border-radius: 4px; color: #d63384; font-size: 12px; }
+            a.link { color: #0056b3; font-weight: bold; }
         </style>
     </head>
     <body>
 
     <div class="card">
-        <h3>🔑 ขั้นตอนที่ 1: ล็อกอินครั้งแรก (ทำแค่ครั้งเดียว)</h3>
-        <p class="steps">คลิกปุ่มด้านล่างเพื่อเปิดหน้าเว็บ Omron จากนั้นกรอก Email/Password และกดยอมรับ Cookie ด้วยตัวคุณเองบนหน้าต่างเบราว์เซอร์ที่เด้งขึ้นมา เมื่อล็อกอินเสร็จให้<b>ปิดหน้าต่างเบราว์เซอร์นั้นลง</b></p>
-        <button class="btn-login" onclick="triggerManualLogin()">เปิดหน้าต่างเพื่อ Login มือเปล่า</button>
+        <h3>📌 ขั้นตอนเตรียม Session Cookie</h3>
+        <ol class="steps">
+            <li>เปิดเว็บ <a class="link" href="https://industrial.omron.eu/en/login" target="_blank">Omron Official</a> แล้ว Login ด้วยบัญชีของคุณให้เรียบร้อย</li>
+            <li>กด <code>F12</code> เปิด Developer Tools ไปที่แท็บ <code>Network</code> แล้วกดรีเฟรชหน้าเว็บ (F5)</li>
+            <li>คลิกเลือก Request แรกสุด (ชื่อหน้าเว็บ) มองหาหัวข้อ <code>Request Headers</code></li>
+            <li>คัดลอกค่าหลังคำว่า <code>cookie:</code> ทั้งหมด แล้วนำมาวางในช่องด้านล่างนี้</li>
+        </ol>
+        <label>Omron Cookie String:</label>
+        <input type="text" id="cookieInput" placeholder="วาง Cookie ที่ก๊อปปี้มาจาก F12 ไว้ที่นี่...">
     </div>
 
     <div class="card">
-        <h2>🔎 ขั้นตอนที่ 2: ค้นหา Part Number</h2>
+        <h2>🔎 ค้นหา Part Number</h2>
         <label>ใส่ Part Number ที่ต้องการเช็ค (บรรทัดละ 1 รายการ):</label>
         <textarea id="partsInput" placeholder="CP1E-E10DR-A&#10;CP1E-E14DR-A&#10;E2E-X3D1-M1G"></textarea>
         
@@ -100,17 +104,11 @@ async def serve_ui():
     </div>
 
     <script>
-        async function triggerManualLogin() {
-            alert("ระบบกำลังเปิดเบราว์เซอร์ขึ้นมา...\nกรุณาล็อกอินเข้าสู่ระบบ Omron ให้เรียบร้อย แล้วปิดหน้าต่างเบราว์เซอร์นั้นเพื่อบันทึกสถานะครับ");
-            try {
-                await fetch('/login-manual', { method: 'POST' });
-            } catch (e) {
-                console.error(e);
-            }
-        }
-
         async function processSearch() {
+            const cookieVal = document.getElementById('cookieInput').value.trim();
             const text = document.getElementById('partsInput').value.trim();
+
+            if (!cookieVal) return showError('กรุณาวาง Omron Cookie ในขั้นตอนด้านบนก่อนครับ');
             if (!text) return showError('กรุณากรอก Part Number อย่างน้อย 1 รายการ');
 
             const btn = document.getElementById('submitBtn');
@@ -124,13 +122,16 @@ async def serve_ui():
             errorBox.style.display = 'none';
             successBox.style.display = 'none';
             loading.style.display = 'block';
-            loading.textContent = `⏳ กำลังค้นหา ${partsCount} รายการโดยใช้เซสชันที่บันทึกไว้...`;
+            loading.textContent = `⏳ กำลังค้นหา ${partsCount} รายการผ่านคลาวด์... (กรุณารอสักครู่)`;
 
             try {
                 const response = await fetch('/search', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                    body: new URLSearchParams({ 'part_numbers': text })
+                    body: new URLSearchParams({ 
+                        'omron_cookie': cookieVal,
+                        'part_numbers': text 
+                    })
                 });
 
                 if (response.ok) {
@@ -174,44 +175,59 @@ async def serve_ui():
     """
 
 
-@app.post("/login-manual")
-async def login_manual():
-    async with async_playwright() as p:
-        context = await p.chromium.launch_persistent_context(
-            user_data_dir=USER_DATA_DIR,
-            headless=False,
-            args=["--disable-blink-features=AutomationControlled"]
-        )
-        page = context.pages[0] if context.pages else await context.new_page()
-        await page.goto(LOGIN_URL)
-        
-        try:
-            while len(context.pages) > 0:
-                await asyncio.sleep(1)
-        except Exception:
-            pass
-    return {"status": "closed"}
-
-
 @app.post("/search")
-async def process_search_endpoint(part_numbers: str = Form(...)):
+async def process_search_endpoint(
+    omron_cookie: str = Form(...),
+    part_numbers: str = Form(...)
+):
     parts_list = [p.strip() for p in part_numbers.split("\n") if p.strip()]
     if not parts_list:
         raise HTTPException(status_code=400, detail="ไม่พบข้อมูล Part Number")
 
-    if not os.path.exists(USER_DATA_DIR):
-        raise HTTPException(status_code=400, detail="ยังไม่ได้ทำการ Login! กรุณากดปุ่ม 'เปิดหน้าต่างเพื่อ Login มือเปล่า' ในขั้นตอนที่ 1 ก่อน")
+    if not omron_cookie.strip():
+        raise HTTPException(status_code=400, detail="กรุณาระบุ Session Cookie")
 
-    logger.info(f"เริ่มการค้นหาพาร์ทจำนวน {len(parts_list)} รายการด้วยเซสชันที่บันทึกไว้")
+    # แปลง Cookie string เป็นรูปแบบที่ Playwright ต้องการ
+    cookies_list = []
+    for item in omron_cookie.split(";"):
+        if "=" in item:
+            parts = item.split("=", 1)
+            c_name = parts[0].strip()
+            c_value = parts[1].strip()
+            if c_name:
+                cookies_list.append({
+                    "name": c_name,
+                    "value": c_value,
+                    "domain": ".omron.eu",
+                    "path": "/"
+                })
+
+    logger.info(f"เริ่มการค้นหาพาร์ทจำนวน {len(parts_list)} รายการด้วย Cookie ที่ได้รับ")
 
     async with async_playwright() as p:
-        context = await p.chromium.launch_persistent_context(
-            user_data_dir=USER_DATA_DIR,
+        browser = await p.chromium.launch(
             headless=True,
-            args=["--disable-blink-features=AutomationControlled"]
+            args=[
+                "--no-sandbox", 
+                "--disable-setuid-sandbox", 
+                "--disable-dev-shm-usage",
+                "--disable-blink-features=AutomationControlled"
+            ]
         )
 
-        page = context.pages[0] if context.pages else await context.new_page()
+        context = await browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+            viewport={"width": 1280, "height": 800}
+        )
+
+        # ยัด Cookie เข้าสู่ระบบจำลองเบราว์เซอร์
+        if cookies_list:
+            try:
+                await context.add_cookies(cookies_list)
+            except Exception as e:
+                logger.warning(f"เพิ่ม Cookie บางตัวไม่สำเร็จ: {e}")
+
+        page = await context.new_page()
         all_results = []
 
         try:
@@ -286,7 +302,7 @@ async def process_search_endpoint(part_numbers: str = Form(...)):
             logger.error(f"กระบวนการล้มเหลว: {e}")
             raise HTTPException(status_code=500, detail=str(e))
         finally:
-            await context.close()
+            await browser.close()
 
     df = pd.DataFrame(all_results)
     stream = io.StringIO()
