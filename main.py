@@ -1,3 +1,4 @@
+import os
 import io
 import logging
 import asyncio
@@ -5,7 +6,7 @@ import pandas as pd
 from fastapi import FastAPI, Form, HTTPException
 from fastapi.responses import StreamingResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
-from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
+from playwright.async_api import async_playwright
 
 logging.basicConfig(
     level=logging.INFO,
@@ -24,6 +25,8 @@ app.add_middleware(
 )
 
 SEARCH_BASE_URL = "https://industrial.omron.eu/en/services-support/support/product-lifecycle-management"
+LOGIN_URL = "https://industrial.omron.eu/en/login"
+USER_DATA_DIR = "./omron_browser_profile"  # โฟลเดอร์เก็บสถานะการล็อกอิน
 MIN_DELAY_SEC = 1.0
 
 
@@ -39,7 +42,7 @@ def _empty_result(part: str, target_url: str, status_label: str) -> list[dict]:
 
 
 async def dismiss_cookie_banner(page):
-    """ปิดแบนเนอร์ Cookie ที่มักจะบังหน้าจอ"""
+    """ปิดแบนเนอร์ Cookie"""
     try:
         banner_buttons = page.locator("button#onetrust-accept-btn-handler, .cookie-banner button, button:has-text('Accept All')")
         if await banner_buttons.first.is_visible(timeout=2000):
@@ -49,116 +52,43 @@ async def dismiss_cookie_banner(page):
         pass
 
 
-async def search_omron_parts(page, parts_list: list[str]) -> list[dict]:
-    """เข้าหน้าค้นหาและเริ่มค้นหาทีละ Part โดยตรง"""
-    all_results = []
-    
-    logger.info(f"กำลังนำทางไปยังหน้าค้นหา: {SEARCH_BASE_URL}")
-    await page.goto(SEARCH_BASE_URL, wait_until="domcontentloaded", timeout=40000)
-    await dismiss_cookie_banner(page)
-    await page.wait_for_timeout(2000)
-
-    # Selector สำหรับช่องค้นหาจากรูปตัวอย่างของคุณ
-    search_input_selector = 'input[type="text"], input[type="search"], input.search-input, input[placeholder*="search" i]'
-
-    for idx, part in enumerate(parts_list):
-        try:
-            logger.info(f"[{part}] กำลังค้นหา... ({idx+1}/{len(parts_list)})")
-            
-            search_box = page.locator(search_input_selector).first
-            await search_box.wait_for(state="visible", timeout=10000)
-            
-            # เคลียร์ค่าเก่าและพิมพ์ Part Number ใหม่ลงไป
-            await search_box.click()
-            await page.keyboard.press("Control+A")
-            await page.keyboard.press("Backspace")
-            await search_box.fill(part)
-            await page.wait_for_timeout(800)
-            
-            # คลิกไอคอนแว่นขยาย หรือกด Enter เพื่อค้นหา
-            search_icon = page.locator('button:has(svg), .search-btn, button[type="submit"]')
-            if await search_icon.first.is_visible(timeout=1500):
-                await search_icon.first.click()
-            else:
-                await search_box.press("Enter")
-
-            # รอให้ตารางอัปเดตผลลัพธ์
-            try:
-                await page.wait_for_selector("table tbody tr", state="visible", timeout=10000)
-                await page.wait_for_timeout(1500) # รอเรนเดอร์ข้อมูล
-            except PlaywrightTimeoutError:
-                all_results.extend(_empty_result(part, SEARCH_BASE_URL, "Not Found (Timeout)"))
-                continue
-
-            # ดึงข้อมูลจากตาราง (อิงตามโครงสร้าง Part number, Status, Possible replacement, Discontinuation date)
-            rows = await page.locator("table tbody tr").all()
-            part_found = False
-
-            for row in rows:
-                cols = await row.locator("td").all()
-                if len(cols) >= 4:
-                    p_num = (await cols[0].text_content() or "").strip()
-                    status = (await cols[1].text_content() or "").strip()
-                    replacement = (await cols[2].text_content() or "").strip()
-                    disco_date = (await cols[3].text_content() or "").strip()
-
-                    if "no result" in p_num.lower() or "not found" in p_num.lower() or not p_num:
-                        continue
-
-                    all_results.append({
-                        "Search Input": part,
-                        "Part Number": p_num,
-                        "Status": status,
-                        "Possible Replacement": replacement,
-                        "Discontinuation Date": disco_date,
-                        "Source URL": SEARCH_BASE_URL,
-                    })
-                    part_found = True
-
-            if not part_found:
-                all_results.extend(_empty_result(part, SEARCH_BASE_URL, "Not Found"))
-
-        except Exception as e:
-            logger.error(f"[{part}] เกิดข้อผิดพลาด: {e}")
-            all_results.extend(_empty_result(part, SEARCH_BASE_URL, f"Error: {str(e)[:30]}"))
-
-        if idx < len(parts_list) - 1:
-            await asyncio.sleep(MIN_DELAY_SEC)
-
-    return all_results
-
-
 @app.get("/", response_class=HTMLResponse)
 async def serve_ui():
-    """หน้า UI แบบเรียบง่าย ไม่ต้องใช้ Login"""
     return """
     <!DOCTYPE html>
     <html lang="th">
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Omron Part Lifecycle Exporter</title>
+        <title>Omron Part Search Tool</title>
         <style>
             body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; max-width: 600px; margin: 40px auto; padding: 20px; background: #f0f2f5; }
-            .card { background: white; padding: 25px; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
-            h2 { color: #0056b3; margin-top: 0; font-size: 22px; }
+            .card { background: white; padding: 25px; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); margin-bottom: 15px; }
+            h2 { color: #0056b3; margin-top: 0; font-size: 20px; }
+            h3 { color: #0056b3; margin-top: 0; font-size: 15px; }
             label { font-weight: bold; font-size: 14px; display: block; margin-bottom: 8px; color: #333; }
-            textarea { width: 100%; height: 180px; padding: 12px; border: 1px solid #ccc; border-radius: 6px; box-sizing: border-box; font-family: monospace; font-size: 14px; margin-bottom: 12px; }
+            textarea { width: 100%; height: 160px; padding: 12px; border: 1px solid #ccc; border-radius: 6px; box-sizing: border-box; font-family: monospace; font-size: 14px; margin-bottom: 12px; }
             button { width: 100%; background: #0056b3; color: white; padding: 14px; border: none; border-radius: 6px; font-weight: bold; font-size: 16px; cursor: pointer; transition: 0.2s; }
             button:hover { background: #004494; }
             button:disabled { background: #aaa; cursor: not-allowed; }
+            .btn-login { background: #28a745; margin-bottom: 15px; }
+            .btn-login:hover { background: #218838; }
             .loading { display: none; margin-top: 15px; padding: 12px; background: #e8f4f8; color: #0056b3; border-radius: 6px; font-weight: bold; text-align: center; }
             .error-box { display: none; margin-top: 15px; padding: 12px; background: #fdecea; color: #b71c1c; border-radius: 6px; font-weight: bold; text-align: center; white-space: pre-wrap; }
             .success-box { display: none; margin-top: 15px; padding: 12px; background: #e6f4ea; color: #1e7e34; border-radius: 6px; font-weight: bold; text-align: center; }
-            .hint { font-size: 12px; color: #666; margin-bottom: 15px; }
+            .steps { font-size: 13px; color: #555; line-height: 1.6; padding-left: 18px; margin: 5px 0 15px 0; }
         </style>
     </head>
     <body>
 
     <div class="card">
-        <h2>🔎 Omron Part Lifecycle Search</h2>
-        <div class="hint">ระบบดึงข้อมูลสถานะและรุ่นทดแทนจากเว็บไซต์ Omron โดยตรง (ไม่ต้องล็อกอิน)</div>
-        
+        <h3>🔑 ขั้นตอนที่ 1: ล็อกอินครั้งแรก (ทำแค่ครั้งเดียว)</h3>
+        <p class="steps">คลิกปุ่มด้านล่างเพื่อเปิดหน้าเว็บ Omron จากนั้นกรอก Email/Password และกดยอมรับ Cookie ด้วยตัวคุณเองบนหน้าต่างเบราว์เซอร์ที่เด้งขึ้นมา เมื่อล็อกอินเสร็จให้<b>ปิดหน้าต่างเบราว์เซอร์นั้นลง</b></p>
+        <button class="btn-login" onclick="triggerManualLogin()">เปิดหน้าต่างเพื่อ Login มือเปล่า</button>
+    </div>
+
+    <div class="card">
+        <h2>🔎 ขั้นตอนที่ 2: ค้นหา Part Number</h2>
         <label>ใส่ Part Number ที่ต้องการเช็ค (บรรทัดละ 1 รายการ):</label>
         <textarea id="partsInput" placeholder="CP1E-E10DR-A&#10;CP1E-E14DR-A&#10;E2E-X3D1-M1G"></textarea>
         
@@ -170,6 +100,11 @@ async def serve_ui():
     </div>
 
     <script>
+        async function triggerManualLogin() {
+            alert("ระบบกำลังเปิดเบราว์เซอร์ขึ้นมา...\nกรุณาล็อกอินเข้าสู่ระบบ Omron ให้เรียบร้อย แล้วปิดหน้าต่างเบราว์เซอร์นั้นเพื่อบันทึกสถานะครับ");
+            await fetch('/login-manual', { method: 'POST' });
+        }
+
         async function processSearch() {
             const text = document.getElementById('partsInput').value.trim();
             if (!text) return showError('กรุณากรอก Part Number อย่างน้อย 1 รายการ');
@@ -185,7 +120,7 @@ async def serve_ui():
             errorBox.style.display = 'none';
             successBox.style.display = 'none';
             loading.style.display = 'block';
-            loading.textContent = `⏳ กำลังค้นหา ${partsCount} รายการ... (กรุณารอสักครู่)`;
+            loading.textContent = `⏳ กำลังค้นหา ${partsCount} รายการโดยใช้เซสชันที่บันทึกไว้...`;
 
             try {
                 const response = await fetch('/search', {
@@ -235,42 +170,123 @@ async def serve_ui():
     """
 
 
+@app.post("/login-manual")
+async def login_manual():
+    """เปิดเบราว์เซอร์แบบให้ผู้ใช้กด Login ด้วยตัวเองเพื่อบันทึก Session"""
+    async with async_playwright() as p:
+        context = await p.chromium.launch_persistent_context(
+            user_data_dir=USER_DATA_DIR,
+            headless=False,  # เปิดจอให้เห็นชัดเจน
+            args=["--disable-blink-features=AutomationControlled"]
+        )
+        page = context.pages[0] if context.pages else await context.new_page()
+        await page.goto(LOGIN_URL)
+        
+        # รอจนกว่าผู้ใช้จะปิดหน้าต่างเบราว์เซอร์ไปเอง
+        try:
+            while len(context.pages) > 0:
+                await asyncio.sleep(1)
+        except Exception:
+            pass
+    return {"status": "closed"}
+
+
 @app.post("/search")
 async def process_search_endpoint(part_numbers: str = Form(...)):
     parts_list = [p.strip() for p in part_numbers.split("\n") if p.strip()]
     if not parts_list:
         raise HTTPException(status_code=400, detail="ไม่พบข้อมูล Part Number")
 
-    logger.info(f"เริ่มการค้นหาพาร์ทจำนวน {len(parts_list)} รายการ")
+    if not os.path.exists(USER_DATA_DIR):
+        raise HTTPException(status_code=400, detail="ยังไม่ได้ทำการ Login! กรุณากดปุ่ม 'เปิดหน้าต่างเพื่อ Login มือเปล่า' ในขั้นตอนที่ 1 ก่อน")
+
+    logger.info(f"เริ่มการค้นหาพาร์ทจำนวน {len(parts_list)} รายการด้วยเซสชันที่บันทึกไว้")
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=True,
-            args=[
-                "--no-sandbox", 
-                "--disable-setuid-sandbox", 
-                "--disable-dev-shm-usage",
-                "--disable-blink-features=AutomationControlled"
-            ]
+        # ใช้ Persistent Context เพื่อโหลดสถานะ Login เดิมมาใช้ต่อทันที
+        context = await p.chromium.launch_persistent_context(
+            user_data_dir=USER_DATA_DIR,
+            headless=True,  # รันแบบเบื้องหลังอัตโนมัติ
+            args=["--disable-blink-features=AutomationControlled"]
         )
 
-        context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-            viewport={"width": 1280, "height": 800}
-        )
-
-        page = await context.new_page()
+        page = context.pages[0] if context.pages else await context.new_page()
+        all_results = []
 
         try:
-            # วิ่งตรงเข้าหน้าค้นหาโดยไม่ต้องผ่านหน้า Login
-            all_results = await search_omron_parts(page, parts_list)
+            logger.info(f"กำลังนำทางไปยัง: {SEARCH_BASE_URL}")
+            await page.goto(SEARCH_BASE_URL, wait_until="domcontentloaded", timeout=40000)
+            await dismiss_cookie_banner(page)
+            await page.wait_for_timeout(2000)
+
+            search_input_selector = 'input[type="text"], input[type="search"], input.search-input, input[placeholder*="search" i]'
+
+            for idx, part in enumerate(parts_list):
+                try:
+                    logger.info(f"[{part}] กำลังค้นหา... ({idx+1}/{len(parts_list)})")
+                    
+                    search_box = page.locator(search_input_selector).first
+                    await search_box.wait_for(state="visible", timeout=10000)
+                    
+                    await search_box.click()
+                    await page.keyboard.press("Control+A")
+                    await page.keyboard.press("Backspace")
+                    await search_box.fill(part)
+                    await page.wait_for_timeout(800)
+                    
+                    search_icon = page.locator('button:has(svg), .search-btn, button[type="submit"]')
+                    if await search_icon.first.is_visible(timeout=1500):
+                        await search_icon.first.click()
+                    else:
+                        await search_box.press("Enter")
+
+                    try:
+                        await page.wait_for_selector("table tbody tr", state="visible", timeout=10000)
+                        await page.wait_for_timeout(1500)
+                    except Exception:
+                        all_results.extend(_empty_result(part, SEARCH_BASE_URL, "Not Found (Timeout)"))
+                        continue
+
+                    rows = await page.locator("table tbody tr").all()
+                    part_found = False
+
+                    for row in rows:
+                        cols = await row.locator("td").all()
+                        if len(cols) >= 4:
+                            p_num = (await cols[0].text_content() or "").strip()
+                            status = (await cols[1].text_content() or "").strip()
+                            replacement = (await cols[2].text_content() or "").strip()
+                            disco_date = (await cols[3].text_content() or "").strip()
+
+                            if "no result" in p_num.lower() or "not found" in p_num.lower() or not p_num:
+                                continue
+
+                            all_results.append({
+                                "Search Input": part,
+                                "Part Number": p_num,
+                                "Status": status,
+                                "Possible Replacement": replacement,
+                                "Discontinuation Date": disco_date,
+                                "Source URL": SEARCH_BASE_URL,
+                            })
+                            part_found = True
+
+                    if not part_found:
+                        all_results.extend(_empty_result(part, SEARCH_BASE_URL, "Not Found"))
+
+                except Exception as e:
+                    logger.error(f"[{part}] เกิดข้อผิดพลาด: {e}")
+                    all_results.extend(_empty_result(part, SEARCH_BASE_URL, f"Error: {str(e)[:30]}"))
+
+                if idx < len(parts_list) - 1:
+                    await asyncio.sleep(MIN_DELAY_SEC)
+
         except Exception as e:
             logger.error(f"กระบวนการล้มเหลว: {e}")
             raise HTTPException(status_code=500, detail=str(e))
         finally:
-            await browser.close()
+            await context.close()
 
-    # สร้างไฟล์ CSV ส่งกลับไปให้ผู้ใช้ดาวน์โหลด
     df = pd.DataFrame(all_results)
     stream = io.StringIO()
     df.to_csv(stream, index=False, encoding="utf-8-sig")
