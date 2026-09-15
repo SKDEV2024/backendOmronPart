@@ -216,8 +216,8 @@ async def process_search_endpoint(part_numbers: str = Form(...)):
             await dismiss_cookie_banner(page)
             await page.wait_for_timeout(2000)
 
-            # กรองไม่ให้จับโดน input ที่ซ่อนอยู่ (hidden)
-            search_input_selector = 'input[type="text"]:not([type="hidden"]), input[type="search"]:not([type="hidden"]), input.search-input:not([type="hidden"])'
+            # ล็อกเป้าเฉพาะช่องค้นหาพาร์ทโดยตรง ป้องกันไปโดนฟิลด์ฟอร์มติดต่ออื่นๆ
+            search_input_selector = 'input[placeholder*="part number" i], input[aria-label*="part" i], input.form-control[type="text"]'
 
             for idx, part in enumerate(parts_list):
                 try:
