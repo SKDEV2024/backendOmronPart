@@ -78,10 +78,10 @@ async def serve_ui():
 
     <div class="card">
         <h2>🔎 Omron Part Lifecycle Search</h2>
-        <div class="hint">ระบบตรวจสอบสถานะและรุ่นทดแทนอุปกรณ์ Omron (กรอกรายชื่อพาร์ทเพื่อดึงรายงาน CSV)</div>
+        <div class="hint">ระบบตรวจสอบสถานะและรุ่นทดแทนอุปกรณ์ Omron (ดึงข้อมูลครบทุกหน้าอัตโนมัติลง CSV)</div>
         
         <label>ใส่ Part Number (บรรทัดละ 1 รายการ):</label>
-        <textarea id="partsInput" placeholder="DX100-0010&#10;CP1E-E10DR-A"></textarea>
+        <textarea id="partsInput" placeholder="cp1e&#10;E2E-X3D1-M1G"></textarea>
         
         <button id="submitBtn" onclick="processSearch()">เริ่มค้นหา & ดาวน์โหลด CSV</button>
 
@@ -106,7 +106,7 @@ async def serve_ui():
             errorBox.style.display = 'none';
             successBox.style.display = 'none';
             loading.style.display = 'block';
-            loading.textContent = `⏳ กำลังค้นหา ${partsCount} รายการ... (กรุณารอสักครู่)`;
+            loading.textContent = `⏳ กำลังค้นหา ${partsCount} รายการ (และกวาดข้อมูลทุกหน้า)... (กรุณารอสักครู่)`;
 
             try {
                 const response = await fetch('/search', {
@@ -126,7 +126,7 @@ async def serve_ui():
                     a.remove();
                     window.URL.revokeObjectURL(url);
 
-                    successBox.textContent = '✓ ค้นหาสำเร็จ ไฟล์ CSV ถูกดาวน์โหลดแล้ว!';
+                    successBox.textContent = '✓ ค้นหาสำเร็จและดาวน์โหลดไฟล์ CSV เรียบร้อย!';
                     successBox.style.display = 'block';
                 } else {
                     let detail = `เกิดข้อผิดพลาด (HTTP ${response.status})`;
@@ -216,7 +216,6 @@ async def process_search_endpoint(part_numbers: str = Form(...)):
             await dismiss_cookie_banner(page)
             await page.wait_for_timeout(2000)
 
-            # ล็อกเป้าเฉพาะช่องค้นหาพาร์ทโดยตรง ป้องกันไปโดนฟิลด์ฟอร์มติดต่ออื่นๆ
             search_input_selector = 'input[placeholder*="part number" i], input[aria-label*="part" i], input.form-control[type="text"]'
 
             for idx, part in enumerate(parts_list):
@@ -245,29 +244,48 @@ async def process_search_endpoint(part_numbers: str = Form(...)):
                         all_results.extend(_empty_result(part, SEARCH_BASE_URL, "Not Found (Timeout)"))
                         continue
 
-                    rows = await page.locator("table tbody tr").all()
                     part_found = False
 
-                    for row in rows:
-                        cols = await row.locator("td").all()
-                        if len(cols) >= 4:
-                            p_num = (await cols[0].text_content() or "").strip()
-                            status = (await cols[1].text_content() or "").strip()
-                            replacement = (await cols[2].text_content() or "").strip()
-                            disco_date = (await cols[3].text_content() or "").strip()
+                    # ระบบ Pagination Loop: วนลูปกวาดข้อมูลทุกหน้าจนกว่าจะหมดปุ่ม Next
+                    while True:
+                        rows = await page.locator("table tbody tr").all()
+                        for row in rows:
+                            cols = await row.locator("td").all()
+                            if len(cols) >= 4:
+                                p_num = (await cols[0].text_content() or "").strip()
+                                status = (await cols[1].text_content() or "").strip()
+                                replacement = (await cols[2].text_content() or "").strip()
+                                disco_date = (await cols[3].text_content() or "").strip()
 
-                            if "no result" in p_num.lower() or "not found" in p_num.lower() or not p_num:
-                                continue
+                                if "no result" in p_num.lower() or "not found" in p_num.lower() or not p_num:
+                                    continue
 
-                            all_results.append({
-                                "Search Input": part,
-                                "Part Number": p_num,
-                                "Status": status,
-                                "Possible Replacement": replacement,
-                                "Discontinuation Date": disco_date,
-                                "Source URL": SEARCH_BASE_URL,
-                            })
-                            part_found = True
+                                all_results.append({
+                                    "Search Input": part,
+                                    "Part Number": p_num,
+                                    "Status": status,
+                                    "Possible Replacement": replacement,
+                                    "Discontinuation Date": disco_date,
+                                    "Source URL": SEARCH_BASE_URL,
+                                })
+                                part_found = True
+
+                        # ตรวจสอบว่ามีปุ่ม Next หน้าถัดไปหรือไม่ และสามารถคลิกได้ไหม
+                        next_btn = page.locator("ul.pagination li.next a, a:has-text('Next'), .pagination-next")
+                        # หาปุ่ม Next ที่ไม่ถูก disable
+                        next_active = page.locator("a:has-text('Next'):not(.disabled), li.next:not(.disabled) a")
+                        
+                        try:
+                            if await next_active.first.is_visible(timeout=1500):
+                                # บันทึกข้อความแถวแรกของหน้าปัจจุบันไว้เช็คว่าเปลี่ยนหน้าจริงไหม
+                                first_row_before = await page.locator("table tbody tr").first.text_content()
+                                
+                                await next_active.first.click()
+                                await page.wait_for_timeout(2000) # รอหน้าใหม่โหลด
+                            else:
+                                break
+                        except Exception:
+                            break
 
                     if not part_found:
                         all_results.extend(_empty_result(part, SEARCH_BASE_URL, "Not Found"))
