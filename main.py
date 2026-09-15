@@ -162,15 +162,13 @@ async def process_search_endpoint(part_numbers: str = Form(...)):
     if not parts_list:
         raise HTTPException(status_code=400, detail="ไม่พบข้อมูล Part Number")
 
-    # ดึงค่า Cookie จาก Environment Variable บน Render ที่คุณตั้งค่าไว้
     omron_cookie = os.environ.get("OMRON_COOKIE", "").strip()
     if not omron_cookie:
         raise HTTPException(
             status_code=500, 
-            detail="ระบบยังไม่ได้ตั้งค่าคุกกี้กลาง (OMRON_COOKIE) ที่ฝั่ง Server กรุณาติดต่อผู้ดูแลระบบ"
+            detail="ระบบยังไม่ได้ตั้งค่าคุกกี้กลาง (OMRON_COOKIE) บน Render"
         )
 
-    # แปลง Cookie string เป็นรูปแบบที่ Playwright ต้องการ
     cookies_list = []
     for item in omron_cookie.split(";"):
         if "=" in item:
@@ -218,7 +216,8 @@ async def process_search_endpoint(part_numbers: str = Form(...)):
             await dismiss_cookie_banner(page)
             await page.wait_for_timeout(2000)
 
-            search_input_selector = 'input[type="text"], input[type="search"], input.search-input, input[placeholder*="search" i]'
+            # ปรับปรุง Selector ให้ตรงกับช่องค้นหาของ Omron จากภาพจริง
+            search_input_selector = 'input[placeholder*="part number" i], input[type="text"], input.search-input'
 
             for idx, part in enumerate(parts_list):
                 try:
@@ -233,12 +232,14 @@ async def process_search_endpoint(part_numbers: str = Form(...)):
                     await search_box.fill(part)
                     await page.wait_for_timeout(800)
                     
+                    # คลิกปุ่มแว่นขยาย หรือกด Enter เพื่อค้นหา
                     search_icon = page.locator('button:has(svg), .search-btn, button[type="submit"]')
                     if await search_icon.first.is_visible(timeout=1500):
                         await search_icon.first.click()
                     else:
                         await search_box.press("Enter")
 
+                    # รอให้ตารางผลลัพธ์โหลดขึ้นมา
                     try:
                         await page.wait_for_selector("table tbody tr", state="visible", timeout=10000)
                         await page.wait_for_timeout(1500)
