@@ -40,10 +40,10 @@ def _empty_result(part: str, target_url: str, status_label: str) -> list[dict]:
 
 
 async def dismiss_cookie_banner(page):
-    """ปิดแบนเนอร์ Cookie ของหน้าเว็บ"""
+    """ปิดแบนเนอร์ Cookie แบบปลอดภัยไม่ให้ติด Timeout"""
     try:
         banner_buttons = page.locator("button#onetrust-accept-btn-handler, .cookie-banner button, button:has-text('Accept All')")
-        if await banner_buttons.first.is_visible(timeout=2000):
+        if await banner_buttons.first.is_visible(timeout=3000):
             await banner_buttons.first.click()
             await page.wait_for_timeout(1000)
     except Exception:
@@ -81,7 +81,7 @@ async def serve_ui():
         <div class="hint">ระบบตรวจสอบสถานะและรุ่นทดแทนอุปกรณ์ Omron (กรอกรายชื่อพาร์ทเพื่อดึงรายงาน CSV)</div>
         
         <label>ใส่ Part Number (บรรทัดละ 1 รายการ):</label>
-        <textarea id="partsInput" placeholder="CP1E-E10DR-A&#10;CP1E-E14DR-A&#10;E2E-X3D1-M1G"></textarea>
+        <textarea id="partsInput" placeholder="DX100-0010&#10;CP1E-E10DR-A"></textarea>
         
         <button id="submitBtn" onclick="processSearch()">เริ่มค้นหา & ดาวน์โหลด CSV</button>
 
@@ -212,37 +212,35 @@ async def process_search_endpoint(part_numbers: str = Form(...)):
 
         try:
             logger.info(f"กำลังนำทางไปยัง: {SEARCH_BASE_URL}")
-            await page.goto(SEARCH_BASE_URL, wait_until="domcontentloaded", timeout=40000)
+            await page.goto(SEARCH_BASE_URL, wait_until="networkidle", timeout=50000)
             await dismiss_cookie_banner(page)
             await page.wait_for_timeout(2000)
 
-            # ปรับปรุง Selector ให้ตรงกับช่องค้นหาของ Omron จากภาพจริง
-            search_input_selector = 'input[placeholder*="part number" i], input[type="text"], input.search-input'
+            # ใช้ Selector หลายแบบเผื่อช่องกรอกเปลี่ยนสถานะ
+            search_input_selector = 'input[type="text"], input[type="search"], input.search-input, input'
 
             for idx, part in enumerate(parts_list):
                 try:
                     logger.info(f"[{part}] กำลังค้นหา...")
                     
                     search_box = page.locator(search_input_selector).first
-                    await search_box.wait_for(state="visible", timeout=10000)
+                    await search_box.wait_for(state="visible", timeout=15000)
                     
                     await search_box.click()
                     await page.keyboard.press("Control+A")
                     await page.keyboard.press("Backspace")
                     await search_box.fill(part)
-                    await page.wait_for_timeout(800)
+                    await page.wait_for_timeout(1000)
                     
-                    # คลิกปุ่มแว่นขยาย หรือกด Enter เพื่อค้นหา
                     search_icon = page.locator('button:has(svg), .search-btn, button[type="submit"]')
-                    if await search_icon.first.is_visible(timeout=1500):
+                    if await search_icon.first.is_visible(timeout=2000):
                         await search_icon.first.click()
                     else:
                         await search_box.press("Enter")
 
-                    # รอให้ตารางผลลัพธ์โหลดขึ้นมา
                     try:
-                        await page.wait_for_selector("table tbody tr", state="visible", timeout=10000)
-                        await page.wait_for_timeout(1500)
+                        await page.wait_for_selector("table tbody tr", state="visible", timeout=12000)
+                        await page.wait_for_timeout(2000)
                     except Exception:
                         all_results.extend(_empty_result(part, SEARCH_BASE_URL, "Not Found (Timeout)"))
                         continue
