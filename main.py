@@ -40,7 +40,7 @@ def _empty_result(part: str, target_url: str, status_label: str) -> list[dict]:
 
 
 async def dismiss_cookie_banner(page):
-    """ปิดแบนเนอร์ Cookie แบบปลอดภัยไม่ให้ติด Timeout"""
+    """ปิดแบนเนอร์ Cookie ของหน้าเว็บ"""
     try:
         banner_buttons = page.locator("button#onetrust-accept-btn-handler, .cookie-banner button, button:has-text('Accept All')")
         if await banner_buttons.first.is_visible(timeout=3000):
@@ -216,8 +216,8 @@ async def process_search_endpoint(part_numbers: str = Form(...)):
             await dismiss_cookie_banner(page)
             await page.wait_for_timeout(2000)
 
-            # ใช้ Selector หลายแบบเผื่อช่องกรอกเปลี่ยนสถานะ
-            search_input_selector = 'input[type="text"], input[type="search"], input.search-input, input'
+            # กรองไม่ให้จับโดน input ที่ซ่อนอยู่ (hidden)
+            search_input_selector = 'input[type="text"]:not([type="hidden"]), input[type="search"]:not([type="hidden"]), input.search-input:not([type="hidden"])'
 
             for idx, part in enumerate(parts_list):
                 try:
