@@ -4,7 +4,7 @@ import logging
 import asyncio
 import pandas as pd
 from fastapi import FastAPI, Form, HTTPException
-from fastapi.responses import StreamingResponse, HTMLResponse
+from fastapi.responses import StreamingResponse, HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from playwright.async_api import async_playwright
 
@@ -60,53 +60,87 @@ async def serve_ui():
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Omron Part Lifecycle Checker</title>
         <style>
-            body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; max-width: 600px; margin: 40px auto; padding: 20px; background: #f0f2f5; }
-            .card { background: white; padding: 25px; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+            body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; max-width: 900px; margin: 30px auto; padding: 20px; background: #f0f2f5; }
+            .card { background: white; padding: 25px; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); margin-bottom: 20px; }
             h2 { color: #0056b3; margin-top: 0; font-size: 22px; }
             label { font-weight: bold; font-size: 14px; display: block; margin-bottom: 8px; color: #333; }
-            textarea { width: 100%; height: 180px; padding: 12px; border: 1px solid #ccc; border-radius: 6px; box-sizing: border-box; font-family: monospace; font-size: 14px; margin-bottom: 12px; }
-            button { width: 100%; background: #0056b3; color: white; padding: 14px; border: none; border-radius: 6px; font-weight: bold; font-size: 16px; cursor: pointer; transition: 0.2s; }
+            textarea { width: 100%; height: 120px; padding: 12px; border: 1px solid #ccc; border-radius: 6px; box-sizing: border-box; font-family: monospace; font-size: 14px; margin-bottom: 12px; }
+            .btn-group { display: flex; gap: 10px; }
+            button { flex: 1; background: #0056b3; color: white; padding: 12px; border: none; border-radius: 6px; font-weight: bold; font-size: 15px; cursor: pointer; transition: 0.2s; }
             button:hover { background: #004494; }
             button:disabled { background: #aaa; cursor: not-allowed; }
+            button.secondary { background: #28a745; }
+            button.secondary:hover { background: #218838; }
             .loading { display: none; margin-top: 15px; padding: 12px; background: #e8f4f8; color: #0056b3; border-radius: 6px; font-weight: bold; text-align: center; }
             .error-box { display: none; margin-top: 15px; padding: 12px; background: #fdecea; color: #b71c1c; border-radius: 6px; font-weight: bold; text-align: center; white-space: pre-wrap; }
-            .success-box { display: none; margin-top: 15px; padding: 12px; background: #e6f4ea; color: #1e7e34; border-radius: 6px; font-weight: bold; text-align: center; }
             .hint { font-size: 13px; color: #666; margin-bottom: 15px; }
+            
+            /* ตารางแสดงผลลัพธ์ */
+            table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 13px; }
+            th, td { border: 1px solid #ddd; padding: 10px; text-align: left; }
+            th { background-color: #0056b3; color: white; }
+            tr:nth-child(even) { background-color: #f9f9f9; }
+            .table-container { max-height: 400px; overflow-y: auto; margin-top: 15px; }
         </style>
     </head>
     <body>
 
     <div class="card">
-        <h2>🔎 Omron Part Lifecycle Search</h2>
-        <div class="hint">ระบบตรวจสอบสถานะและรุ่นทดแทนอุปกรณ์ Omron (ดึงข้อมูลครบทุกหน้าอัตโนมัติลง CSV)</div>
+        <h2>🔎 Omron Part Lifecycle Search Dashboard</h2>
+        <div class="hint">ตรวจสอบสถานะอุปกรณ์ Omron พร้อมแสดงผลแบบเรียลไทม์บนหน้าเว็บและดาวน์โหลด CSV ได้ทันที</div>
         
         <label>ใส่ Part Number (บรรทัดละ 1 รายการ):</label>
-        <textarea id="partsInput" placeholder="cp1e&#10;E2E-X3D1-M1G"></textarea>
+        <textarea id="partsInput" placeholder="cp1e&#10;DX100-0010"></textarea>
         
-        <button id="submitBtn" onclick="processSearch()">เริ่มค้นหา & ดาวน์โหลด CSV</button>
+        <div class="btn-group">
+            <button id="submitBtn" onclick="processSearch()">เริ่มค้นหาข้อมูล</button>
+            <button id="downloadBtn" class="secondary" onclick="downloadCSV()" style="display:none;">ดาวน์โหลด CSV Report</button>
+        </div>
 
         <div id="loadingBox" class="loading"></div>
         <div id="errorBox" class="error-box"></div>
-        <div id="successBox" class="success-box"></div>
+    </div>
+
+    <div class="card" id="resultCard" style="display:none;">
+        <h2>📊 ผลการค้นหา (เรียลไทม์)</h2>
+        <div class="table-container">
+            <table id="resultTable">
+                <thead>
+                    <tr>
+                        <th>Search Input</th>
+                        <th>Part Number</th>
+                        <th>Status</th>
+                        <th>Possible Replacement</th>
+                        <th>Discontinuation Date</th>
+                    </tr>
+                </thead>
+                <tbody id="resultBody">
+                </tbody>
+            </table>
+        </div>
     </div>
 
     <script>
+        let currentCsvData = "";
+
         async function processSearch() {
             const text = document.getElementById('partsInput').value.trim();
             if (!text) return showError('กรุณากรอก Part Number อย่างน้อย 1 รายการ');
 
             const btn = document.getElementById('submitBtn');
+            const downloadBtn = document.getElementById('downloadBtn');
             const loading = document.getElementById('loadingBox');
             const errorBox = document.getElementById('errorBox');
-            const successBox = document.getElementById('successBox');
-
-            const partsCount = text.split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 0).length;
+            const resultCard = document.getElementById('resultCard');
+            const resultBody = document.getElementById('resultBody');
 
             btn.disabled = true;
+            downloadBtn.style.display = 'none';
             errorBox.style.display = 'none';
-            successBox.style.display = 'none';
+            resultBody.innerHTML = '';
+            resultCard.style.display = 'none';
             loading.style.display = 'block';
-            loading.textContent = `⏳ กำลังค้นหา ${partsCount} รายการ (และกวาดข้อมูลทุกหน้า)... (กรุณารอสักครู่)`;
+            loading.textContent = '⏳ กำลังประมวลผลเชื่อมต่อระบบ Omron... (กรุณารอสักครู่)';
 
             try {
                 const response = await fetch('/search', {
@@ -116,18 +150,25 @@ async def serve_ui():
                 });
 
                 if (response.ok) {
-                    const blob = await response.blob();
-                    const url = window.URL.createObjectURL(blob);
-                    const a = document.createElement('a');
-                    a.href = url;
-                    a.download = `Omron_Lifecycle_Report_${new Date().toISOString().slice(0, 10)}.csv`;
-                    document.body.appendChild(a);
-                    a.click();
-                    a.remove();
-                    window.URL.revokeObjectURL(url);
+                    const data = await response.json();
+                    currentCsvData = data.csv_data;
+                    
+                    // เติมข้อมูลลงในตารางบนหน้าเว็บ
+                    data.results.forEach(row => {
+                        const tr = document.createElement('tr');
+                        tr.innerHTML = `
+                            <td>${row['Search Input']}</td>
+                            <td>${row['Part Number']}</td>
+                            <td>${row['Status']}</td>
+                            <td>${row['Possible Replacement']}</td>
+                            <td>${row['Discontinuation Date']}</td>
+                        `;
+                        resultBody.appendChild(tr);
+                    });
 
-                    successBox.textContent = '✓ ค้นหาสำเร็จและดาวน์โหลดไฟล์ CSV เรียบร้อย!';
-                    successBox.style.display = 'block';
+                    resultCard.style.display = 'block';
+                    downloadBtn.style.display = 'block';
+                    loading.style.display = 'none';
                 } else {
                     let detail = `เกิดข้อผิดพลาด (HTTP ${response.status})`;
                     try {
@@ -135,17 +176,30 @@ async def serve_ui():
                         if (errJson && errJson.detail) detail += '\n' + errJson.detail;
                     } catch (_) {}
                     showError(detail);
+                    loading.style.display = 'none';
                 }
             } catch (err) {
                 showError('ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์ได้: ' + err.message);
+                loading.style.display = 'none';
             } finally {
                 btn.disabled = false;
-                loading.style.display = 'none';
             }
         }
 
+        function downloadCSV() {
+            if (!currentCsvData) return;
+            const blob = new Blob(["\uFEFF" + currentCsvData], { type: 'text/csv;charset=utf-8;' });
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `Omron_Lifecycle_Report_${new Date().toISOString().slice(0, 10)}.csv`;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            window.URL.revokeObjectURL(url);
+        }
+
         function showError(msg) {
-            document.getElementById('successBox').style.display = 'none';
             const errorBox = document.getElementById('errorBox');
             errorBox.textContent = '⚠️ ' + msg;
             errorBox.style.display = 'block';
@@ -183,7 +237,7 @@ async def process_search_endpoint(part_numbers: str = Form(...)):
                     "path": "/"
                 })
 
-    logger.info(f"เริ่มการค้นหาพาร์ทจำนวน {len(parts_list)} รายการให้ผู้ใช้")
+    logger.info(f"เริ่มการค้นหาพาร์ทจำนวน {len(parts_list)} รายการให้ผู้ใช้ผ่านเว็บแดชบอร์ด")
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -246,7 +300,7 @@ async def process_search_endpoint(part_numbers: str = Form(...)):
 
                     part_found = False
 
-                    # ระบบ Pagination Loop: วนลูปกวาดข้อมูลทุกหน้าจนกว่าจะหมดปุ่ม Next
+                    # Pagination Loop: กวาดข้อมูลทุกหน้า
                     while True:
                         rows = await page.locator("table tbody tr").all()
                         for row in rows:
@@ -270,18 +324,11 @@ async def process_search_endpoint(part_numbers: str = Form(...)):
                                 })
                                 part_found = True
 
-                        # ตรวจสอบว่ามีปุ่ม Next หน้าถัดไปหรือไม่ และสามารถคลิกได้ไหม
-                        next_btn = page.locator("ul.pagination li.next a, a:has-text('Next'), .pagination-next")
-                        # หาปุ่ม Next ที่ไม่ถูก disable
                         next_active = page.locator("a:has-text('Next'):not(.disabled), li.next:not(.disabled) a")
-                        
                         try:
                             if await next_active.first.is_visible(timeout=1500):
-                                # บันทึกข้อความแถวแรกของหน้าปัจจุบันไว้เช็คว่าเปลี่ยนหน้าจริงไหม
-                                first_row_before = await page.locator("table tbody tr").first.text_content()
-                                
                                 await next_active.first.click()
-                                await page.wait_for_timeout(2000) # รอหน้าใหม่โหลด
+                                await page.wait_for_timeout(2000)
                             else:
                                 break
                         except Exception:
@@ -304,15 +351,12 @@ async def process_search_endpoint(part_numbers: str = Form(...)):
             await browser.close()
 
     df = pd.DataFrame(all_results)
-    stream = io.StringIO()
-    df.to_csv(stream, index=False, encoding="utf-8-sig")
+    csv_string = df.to_csv(index=False, encoding="utf-8")
 
-    response = StreamingResponse(
-        iter([stream.getvalue()]),
-        media_type="text/csv"
-    )
-    response.headers["Content-Disposition"] = "attachment; filename=omron_lifecycle_report.csv"
-    return response
+    return JSONResponse(content={
+        "results": all_results,
+        "csv_data": csv_string
+    })
 
 
 @app.get("/health")
